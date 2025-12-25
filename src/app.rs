@@ -18,7 +18,7 @@ use windows::Win32::UI::WindowsAndMessaging::{SetForegroundWindow, ShowWindow, S
 
 use crate::i18n::{strings, Language};
 use crate::image_ops::{collect_images, pick_random, process_image, FolderSource};
-use crate::settings::{self, AppSettings};
+use crate::settings::{self, AppSettings, FolderSetting};
 use crate::startup;
 use crate::wallpaper::{set_wallpaper, set_wallpaper_style, StyleMode};
 
@@ -56,13 +56,17 @@ enum WorkerEvent {
 
 impl WallpaperApp {
     pub fn new(cc: &CreationContext<'_>, started_from_startup: bool) -> Self {
-        let language = Language::En;
         configure_fonts(&cc.egui_ctx);
-        let status = strings(language).status_idle.to_string();
         let mut settings = settings::load();
         if let Ok(enabled) = startup::is_enabled() {
-            settings.run_on_startup = enabled;
+            if settings.run_on_startup != enabled {
+                settings.run_on_startup = enabled;
+                let _ = settings::save(&settings);
+            }
         }
+        let language = settings.language;
+        let status = strings(language).status_idle.to_string();
+        apply_theme(&cc.egui_ctx, settings.light_theme);
         let window_hwnd = window_hwnd_from_context(cc);
         let tray_icon = create_tray_icon(language);
         let tray_restore_requested = Arc::new(AtomicBool::new(false));
@@ -85,14 +89,28 @@ impl WallpaperApp {
             });
         }
         let minimize_pending = settings.minimize_to_tray_on_start && started_from_startup;
-        Self {
-            folders: Vec::new(),
-            single_image: None,
-            auto_rotate: true,
-            random_order: true,
-            interval_secs: 600,
-            language,
-            style: StyleMode::Fill,
+        let folders = settings
+            .folders
+            .iter()
+            .map(|folder| FolderSource {
+                path: PathBuf::from(&folder.path),
+                include_subfolders: folder.include_subfolders,
+            })
+            .collect();
+        let single_image = settings
+            .single_image
+            .as_ref()
+            .map(|path| PathBuf::from(path));
+        let should_start = settings.running;
+
+        let mut app = Self {
+            folders,
+            single_image,
+            auto_rotate: settings.auto_rotate,
+            random_order: settings.random_order,
+            interval_secs: settings.interval_secs,
+            language: settings.language,
+            style: settings.style,
             status,
             running: false,
             worker: None,
@@ -100,7 +118,18 @@ impl WallpaperApp {
             tray_icon,
             tray_restore_requested,
             minimize_pending,
+        };
+
+        if should_start {
+            if let Err(err) = app.start_slideshow() {
+                app.status = err.to_string();
+                app.running = false;
+                app.settings.running = false;
+                let _ = settings::save(&app.settings);
+            }
         }
+
+        app
     }
 
     pub fn ui(&mut self, ctx: &egui::Context) {
@@ -118,13 +147,50 @@ impl WallpaperApp {
                         Language::Cht => "繁體中文",
                     })
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.language, Language::En, "English");
-                        ui.selectable_value(&mut self.language, Language::Cht, "繁體中文");
+                        let mut language_changed = false;
+                        if ui
+                            .selectable_value(&mut self.language, Language::En, "English")
+                            .changed()
+                        {
+                            language_changed = true;
+                        }
+                        if ui
+                            .selectable_value(&mut self.language, Language::Cht, "繁體中文")
+                            .changed()
+                        {
+                            language_changed = true;
+                        }
+                        if language_changed {
+                            self.persist_settings();
+                        }
                     });
+            });
+            ui.horizontal(|ui| {
+                ui.label(t.theme);
+                let mut changed = false;
+                if ui
+                    .selectable_label(self.settings.light_theme, t.theme_light)
+                    .clicked()
+                {
+                    self.settings.light_theme = true;
+                    changed = true;
+                }
+                if ui
+                    .selectable_label(!self.settings.light_theme, t.theme_dark)
+                    .clicked()
+                {
+                    self.settings.light_theme = false;
+                    changed = true;
+                }
+                if changed {
+                    apply_theme(ctx, self.settings.light_theme);
+                    self.persist_settings();
+                }
             });
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
+            let mut settings_changed = false;
             ui.horizontal(|ui| {
                 if ui.button(t.add_folder).clicked() {
                     if let Some(path) = rfd::FileDialog::new().pick_folder() {
@@ -132,10 +198,14 @@ impl WallpaperApp {
                             path,
                             include_subfolders: true,
                         });
+                        settings_changed = true;
                     }
                 }
                 if ui.button(t.add_folders).clicked() {
                     if let Some(paths) = rfd::FileDialog::new().pick_folders() {
+                        if !paths.is_empty() {
+                            settings_changed = true;
+                        }
                         for path in paths {
                             self.folders.push(FolderSource {
                                 path,
@@ -147,11 +217,13 @@ impl WallpaperApp {
                 if ui.button(t.add_image).clicked() {
                     if let Some(path) = rfd::FileDialog::new().add_filter("Images", &["png", "jpg", "jpeg", "bmp", "gif", "tif", "tiff", "webp"]).pick_file() {
                         self.single_image = Some(path);
+                        settings_changed = true;
                     }
                 }
-                if ui.button("Clear").clicked() {
+                if ui.button(t.clear_all).clicked() {
                     self.folders.clear();
                     self.single_image = None;
+                    settings_changed = true;
                 }
             });
 
@@ -162,40 +234,56 @@ impl WallpaperApp {
                 for (idx, folder) in self.folders.iter_mut().enumerate() {
                     ui.horizontal(|ui| {
                         ui.label(folder.path.display().to_string());
-                        ui.checkbox(&mut folder.include_subfolders, t.include_subfolders);
-                        if ui.button("✕").clicked() {
+                        if ui
+                            .checkbox(&mut folder.include_subfolders, t.include_subfolders)
+                            .changed()
+                        {
+                            settings_changed = true;
+                        }
+                        if ui.button(t.remove).clicked() {
                             to_remove.push(idx);
                         }
                     });
                 }
                 for idx in to_remove.into_iter().rev() {
                     self.folders.remove(idx);
+                    settings_changed = true;
                 }
                 let mut clear_single = false;
                 if let Some(img) = self.single_image.as_ref() {
                     let label = format!("Single: {}", img.display());
                     ui.horizontal(|ui| {
                         ui.label(label);
-                        if ui.button("✕").clicked() {
+                        if ui.button(t.remove).clicked() {
                             clear_single = true;
                         }
                     });
                 }
                 if clear_single {
                     self.single_image = None;
+                    settings_changed = true;
                 }
             });
 
             ui.separator();
 
             ui.horizontal(|ui| {
-                ui.checkbox(&mut self.auto_rotate, t.auto_rotate);
-                ui.checkbox(&mut self.random_order, t.random_order);
+                if ui.checkbox(&mut self.auto_rotate, t.auto_rotate).changed() {
+                    settings_changed = true;
+                }
+                if ui.checkbox(&mut self.random_order, t.random_order).changed() {
+                    settings_changed = true;
+                }
             });
 
             ui.horizontal(|ui| {
                 ui.label(t.slideshow);
-                ui.add(egui::Slider::new(&mut self.interval_secs, 5..=7200).text(t.interval_seconds));
+                if ui
+                    .add(egui::Slider::new(&mut self.interval_secs, 5..=7200).text(t.interval_seconds))
+                    .changed()
+                {
+                    settings_changed = true;
+                }
             });
 
             ui.separator();
@@ -237,7 +325,12 @@ impl WallpaperApp {
                 .selected_text(style_label(self.style, self.language))
                 .show_ui(ui, |ui| {
                     for mode in StyleMode::ALL {
-                        ui.selectable_value(&mut self.style, mode, style_label(mode, self.language));
+                        if ui
+                            .selectable_value(&mut self.style, mode, style_label(mode, self.language))
+                            .changed()
+                        {
+                            settings_changed = true;
+                        }
                     }
                 });
 
@@ -255,12 +348,14 @@ impl WallpaperApp {
                     if ui.button(t.stop).clicked() {
                         self.stop_worker();
                         self.status = t.status_idle.to_string();
+                        self.persist_settings();
                     }
                 } else if ui.button(t.start).clicked() {
                     match self.start_slideshow() {
                         Ok(_) => {
                             self.running = true;
                             self.status = t.status_running.to_string();
+                            self.persist_settings();
                         }
                         Err(err) => self.status = err.to_string(),
                     }
@@ -269,6 +364,10 @@ impl WallpaperApp {
 
             ui.separator();
             ui.label(format!("Status: {}", self.status));
+
+            if settings_changed {
+                self.persist_settings();
+            }
         });
     }
 
@@ -334,15 +433,44 @@ impl WallpaperApp {
         self.running = false;
     }
 
+    fn persist_settings(&mut self) {
+        self.settings.folders = self
+            .folders
+            .iter()
+            .map(|folder| FolderSetting {
+                path: folder.path.to_string_lossy().to_string(),
+                include_subfolders: folder.include_subfolders,
+            })
+            .collect();
+        self.settings.single_image = self
+            .single_image
+            .as_ref()
+            .map(|path| path.to_string_lossy().to_string());
+        self.settings.auto_rotate = self.auto_rotate;
+        self.settings.random_order = self.random_order;
+        self.settings.interval_secs = self.interval_secs;
+        self.settings.language = self.language;
+        self.settings.style = self.style;
+        self.settings.running = self.running;
+        if let Err(err) = settings::save(&self.settings) {
+            self.status = err.to_string();
+        }
+    }
+
     fn drain_events(&mut self) {
+        let mut events = Vec::new();
         if let Some(worker) = &self.worker {
             while let Ok(evt) = worker.event_rx.try_recv() {
-                match evt {
-                    WorkerEvent::Info(msg) => self.status = msg,
-                    WorkerEvent::Error(msg) => {
-                        self.status = msg;
-                        self.running = false;
-                    }
+                events.push(evt);
+            }
+        }
+        for evt in events {
+            match evt {
+                WorkerEvent::Info(msg) => self.status = msg,
+                WorkerEvent::Error(msg) => {
+                    self.status = msg;
+                    self.running = false;
+                    self.persist_settings();
                 }
             }
         }
@@ -429,6 +557,14 @@ fn configure_fonts(ctx: &egui::Context) {
         .or_default()
         .insert(0, "cjk".to_string());
     ctx.set_fonts(fonts);
+}
+
+fn apply_theme(ctx: &egui::Context, light: bool) {
+    if light {
+        ctx.set_visuals(egui::Visuals::light());
+    } else {
+        ctx.set_visuals(egui::Visuals::dark());
+    }
 }
 
 fn window_hwnd_from_context(cc: &CreationContext<'_>) -> Option<HWND> {
@@ -582,3 +718,6 @@ fn style_label(mode: StyleMode, lang: Language) -> &'static str {
         (m, _) => m.label(),
     }
 }
+
+
+

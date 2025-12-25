@@ -5,12 +5,49 @@ use anyhow::{anyhow, Result};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
+use crate::i18n::Language;
+use crate::wallpaper::StyleMode;
+
 const SETTINGS_FILE: &str = "settings.json";
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FolderSetting {
+    pub path: String,
+    pub include_subfolders: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AppSettings {
     pub run_on_startup: bool,
     pub minimize_to_tray_on_start: bool,
+    pub folders: Vec<FolderSetting>,
+    pub single_image: Option<String>,
+    pub auto_rotate: bool,
+    pub random_order: bool,
+    pub interval_secs: u64,
+    pub language: Language,
+    pub style: StyleMode,
+    pub running: bool,
+    pub light_theme: bool,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            run_on_startup: false,
+            minimize_to_tray_on_start: false,
+            folders: Vec::new(),
+            single_image: None,
+            auto_rotate: true,
+            random_order: true,
+            interval_secs: 600,
+            language: Language::En,
+            style: StyleMode::Fill,
+            running: false,
+            light_theme: true,
+        }
+    }
 }
 
 fn settings_path() -> Result<PathBuf> {

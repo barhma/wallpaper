@@ -9,7 +9,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SystemParametersInfoW, SPI_SETDESKWALLPAPER, SPIF_SENDCHANGE, SPIF_UPDATEINIFILE,
 };
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum StyleMode {
     Fill,
     Fit,
