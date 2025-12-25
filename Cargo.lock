@@ -3870,6 +3870,7 @@ dependencies = [
  "image 0.25.9",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
+ "raw-window-handle 0.6.2",
  "rfd",
  "serde",
  "serde_json",

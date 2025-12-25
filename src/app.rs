@@ -1,27 +1,26 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use eframe::egui::{self, RichText};
+use eframe::egui::{self, FontData, FontDefinitions, FontFamily, RichText};
 use eframe::CreationContext;
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
 use rand_chacha::ChaChaRng;
-use tray_icon::{
-    menu::{Menu, MenuEvent, MenuItem},
-    Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
-};
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use tray_icon::{Icon, TrayIcon, TrayIconBuilder, TrayIconEvent};
+use windows::Win32::Foundation::HWND;
+use windows::Win32::UI::WindowsAndMessaging::{SetForegroundWindow, ShowWindow, SW_RESTORE};
 
 use crate::i18n::{strings, Language};
 use crate::image_ops::{collect_images, pick_random, process_image, FolderSource};
 use crate::settings::{self, AppSettings};
 use crate::startup;
 use crate::wallpaper::{set_wallpaper, set_wallpaper_style, StyleMode};
-
-const MENU_RESTORE: &str = "tray_restore";
-const MENU_QUIT: &str = "tray_quit";
 
 pub struct WallpaperApp {
     folders: Vec<FolderSource>,
@@ -36,8 +35,8 @@ pub struct WallpaperApp {
     worker: Option<WorkerHandle>,
     settings: AppSettings,
     tray_icon: Option<TrayIcon>,
+    tray_restore_requested: Arc<AtomicBool>,
     minimize_pending: bool,
-    tray_event_rx: Receiver<TrayMessage>,
 }
 
 struct WorkerHandle {
@@ -55,33 +54,36 @@ enum WorkerEvent {
     Error(String),
 }
 
-enum TrayMessage {
-    Menu(MenuEvent),
-    Tray(TrayIconEvent),
-}
-
 impl WallpaperApp {
     pub fn new(cc: &CreationContext<'_>, started_from_startup: bool) -> Self {
         let language = Language::En;
+        configure_fonts(&cc.egui_ctx);
         let status = strings(language).status_idle.to_string();
         let mut settings = settings::load();
         if let Ok(enabled) = startup::is_enabled() {
             settings.run_on_startup = enabled;
         }
+        let window_hwnd = window_hwnd_from_context(cc);
         let tray_icon = create_tray_icon(language);
-        let (tray_event_tx, tray_event_rx) = mpsc::channel();
-        let tray_tx = tray_event_tx.clone();
-        let ctx = cc.egui_ctx.clone();
-        let _ = MenuEvent::set_event_handler(Some(move |event| {
-            let _ = tray_tx.send(TrayMessage::Menu(event));
-            ctx.request_repaint();
-        }));
-        let tray_tx = tray_event_tx;
-        let ctx = cc.egui_ctx.clone();
-        let _ = TrayIconEvent::set_event_handler(Some(move |event| {
-            let _ = tray_tx.send(TrayMessage::Tray(event));
-            ctx.request_repaint();
-        }));
+        let tray_restore_requested = Arc::new(AtomicBool::new(false));
+        if tray_icon.is_some() {
+            let restore_flag = Arc::clone(&tray_restore_requested);
+            let hwnd = window_hwnd;
+            thread::spawn(move || loop {
+                let Ok(event) = TrayIconEvent::receiver().recv() else {
+                    break;
+                };
+                if matches!(event, TrayIconEvent::Click { .. } | TrayIconEvent::DoubleClick { .. }) {
+                    if let Some(hwnd) = hwnd {
+                        unsafe {
+                            let _ = ShowWindow(hwnd, SW_RESTORE);
+                            let _ = SetForegroundWindow(hwnd);
+                        }
+                    }
+                    restore_flag.store(true, Ordering::SeqCst);
+                }
+            });
+        }
         let minimize_pending = settings.minimize_to_tray_on_start && started_from_startup;
         Self {
             folders: Vec::new(),
@@ -96,8 +98,8 @@ impl WallpaperApp {
             worker: None,
             settings,
             tray_icon,
+            tray_restore_requested,
             minimize_pending,
-            tray_event_rx,
         }
     }
 
@@ -358,30 +360,13 @@ impl WallpaperApp {
             self.minimize_to_tray(ctx);
         }
 
-        while let Ok(message) = self.tray_event_rx.try_recv() {
-            match message {
-                TrayMessage::Menu(event) => {
-                    if event.id == MENU_RESTORE {
-                        self.restore_from_tray(ctx);
-                    } else if event.id == MENU_QUIT {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
-                }
-                TrayMessage::Tray(event) => match event {
-                    TrayIconEvent::DoubleClick { .. } => {
-                        self.restore_from_tray(ctx);
-                    }
-                    TrayIconEvent::Click {
-                        button: MouseButton::Left,
-                        button_state: MouseButtonState::Up,
-                        ..
-                    } => {
-                        self.restore_from_tray(ctx);
-                    }
-                    _ => {}
-                },
-            }
+        if self
+            .tray_restore_requested
+            .swap(false, Ordering::SeqCst)
+        {
+            self.restore_from_tray(ctx);
         }
+
     }
 
     fn minimize_to_tray(&mut self, ctx: &egui::Context) {
@@ -402,6 +387,58 @@ impl WallpaperApp {
     }
 }
 
+fn configure_fonts(ctx: &egui::Context) {
+    let mut fonts = FontDefinitions::default();
+    let candidates = [
+        r"C:\Windows\Fonts\NotoSansTC-VF.ttf",
+        r"C:\Windows\Fonts\NotoSansSC-VF.ttf",
+        r"C:\Windows\Fonts\NotoSansHK-VF.ttf",
+        r"C:\Windows\Fonts\GenJyuuGothic-Monospace-Regular.ttf",
+        r"C:\Windows\Fonts\GenJyuuGothic-Monospace-Normal.ttf",
+        r"C:\Windows\Fonts\GenJyuuGothic-Monospace-Medium.ttf",
+        r"C:\Windows\Fonts\GenJyuuGothic-Monospace-Bold.ttf",
+        r"C:\Windows\Fonts\simhei.ttf",
+        r"C:\Windows\Fonts\simkai.ttf",
+        r"C:\Windows\Fonts\simfang.ttf",
+        r"C:\Windows\Fonts\simsunb.ttf",
+        r"C:\Windows\Fonts\SimsunExtG.ttf",
+        r"C:\Windows\Fonts\kaiu.ttf",
+        r"C:\Windows\Fonts\arialuni.ttf",
+    ];
+    let mut font_data = None;
+    for path in candidates {
+        if let Ok(data) = std::fs::read(path) {
+            font_data = Some(data);
+            break;
+        }
+    }
+    let Some(data) = font_data else {
+        return;
+    };
+    fonts
+        .font_data
+        .insert("cjk".to_string(), FontData::from_owned(data));
+    fonts
+        .families
+        .entry(FontFamily::Proportional)
+        .or_default()
+        .insert(0, "cjk".to_string());
+    fonts
+        .families
+        .entry(FontFamily::Monospace)
+        .or_default()
+        .insert(0, "cjk".to_string());
+    ctx.set_fonts(fonts);
+}
+
+fn window_hwnd_from_context(cc: &CreationContext<'_>) -> Option<HWND> {
+    let handle = cc.window_handle().ok()?;
+    match handle.as_raw() {
+        RawWindowHandle::Win32(win32) => Some(HWND(win32.hwnd.get())),
+        _ => None,
+    }
+}
+
 impl Drop for WallpaperApp {
     fn drop(&mut self) {
         self.stop_worker();
@@ -418,16 +455,9 @@ fn create_tray_icon(language: Language) -> Option<TrayIcon> {
     let icon = default_tray_icon()?;
     let t = strings(language);
 
-    let menu = Menu::new();
-    let restore = MenuItem::with_id(MENU_RESTORE, t.restore, true, None);
-    let quit = MenuItem::with_id(MENU_QUIT, t.quit, true, None);
-    let _ = menu.append(&restore);
-    let _ = menu.append(&quit);
-
     let tray_icon = TrayIconBuilder::new()
         .with_tooltip(t.title)
         .with_icon(icon)
-        .with_menu(Box::new(menu))
         .build();
 
     tray_icon.ok().map(|tray| {
