@@ -37,6 +37,7 @@ pub struct WallpaperApp {
     settings: AppSettings,
     tray_icon: Option<TrayIcon>,
     minimize_pending: bool,
+    tray_event_rx: Receiver<TrayMessage>,
 }
 
 struct WorkerHandle {
@@ -54,8 +55,13 @@ enum WorkerEvent {
     Error(String),
 }
 
+enum TrayMessage {
+    Menu(MenuEvent),
+    Tray(TrayIconEvent),
+}
+
 impl WallpaperApp {
-    pub fn new(_cc: &CreationContext<'_>) -> Self {
+    pub fn new(cc: &CreationContext<'_>, started_from_startup: bool) -> Self {
         let language = Language::En;
         let status = strings(language).status_idle.to_string();
         let mut settings = settings::load();
@@ -63,7 +69,20 @@ impl WallpaperApp {
             settings.run_on_startup = enabled;
         }
         let tray_icon = create_tray_icon(language);
-        let minimize_pending = settings.minimize_to_tray_on_start;
+        let (tray_event_tx, tray_event_rx) = mpsc::channel();
+        let tray_tx = tray_event_tx.clone();
+        let ctx = cc.egui_ctx.clone();
+        let _ = MenuEvent::set_event_handler(Some(move |event| {
+            let _ = tray_tx.send(TrayMessage::Menu(event));
+            ctx.request_repaint();
+        }));
+        let tray_tx = tray_event_tx;
+        let ctx = cc.egui_ctx.clone();
+        let _ = TrayIconEvent::set_event_handler(Some(move |event| {
+            let _ = tray_tx.send(TrayMessage::Tray(event));
+            ctx.request_repaint();
+        }));
+        let minimize_pending = settings.minimize_to_tray_on_start && started_from_startup;
         Self {
             folders: Vec::new(),
             single_image: None,
@@ -78,6 +97,7 @@ impl WallpaperApp {
             settings,
             tray_icon,
             minimize_pending,
+            tray_event_rx,
         }
     }
 
@@ -338,27 +358,28 @@ impl WallpaperApp {
             self.minimize_to_tray(ctx);
         }
 
-        while let Ok(event) = MenuEvent::receiver().try_recv() {
-            if event.id == MENU_RESTORE {
-                self.restore_from_tray(ctx);
-            } else if event.id == MENU_QUIT {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            }
-        }
-
-        while let Ok(event) = TrayIconEvent::receiver().try_recv() {
-            match event {
-                TrayIconEvent::DoubleClick { .. } => {
-                    self.restore_from_tray(ctx);
+        while let Ok(message) = self.tray_event_rx.try_recv() {
+            match message {
+                TrayMessage::Menu(event) => {
+                    if event.id == MENU_RESTORE {
+                        self.restore_from_tray(ctx);
+                    } else if event.id == MENU_QUIT {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
                 }
-                TrayIconEvent::Click {
-                    button: MouseButton::Left,
-                    button_state: MouseButtonState::Up,
-                    ..
-                } => {
-                    self.restore_from_tray(ctx);
-                }
-                _ => {}
+                TrayMessage::Tray(event) => match event {
+                    TrayIconEvent::DoubleClick { .. } => {
+                        self.restore_from_tray(ctx);
+                    }
+                    TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } => {
+                        self.restore_from_tray(ctx);
+                    }
+                    _ => {}
+                },
             }
         }
     }

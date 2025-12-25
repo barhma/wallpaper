@@ -27,7 +27,7 @@ pub fn collect_images(
             let entry = entry?;
             if !entry.file_type().is_file() {
                 continue;
-            ![1766589328077](image/image_ops/1766589328077.png)![1766589330118](image/image_ops/1766589330118.png)}
+            }
             if is_supported_image(entry.path()) {
                 images.push(entry.path().to_path_buf());
             }

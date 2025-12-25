@@ -19,7 +19,7 @@ pub fn is_enabled() -> Result<bool> {
 pub fn enable() -> Result<()> {
     let key = open_run_key(KEY_SET_VALUE)?;
     let exe = std::env::current_exe().context("failed to resolve current executable")?;
-    let command = format!("\"{}\"", exe.display());
+    let command = format!("\"{}\" --startup", exe.display());
     key.set_value(RUN_VALUE, &command)
         .context("failed to set startup registry value")?;
     Ok(())
