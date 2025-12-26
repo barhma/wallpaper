@@ -43,3 +43,5 @@ This repo is a Windows-only Rust desktop app for managing wallpapers via an egui
 
 - Wallpaper styles are applied via `HKCU\Control Panel\Desktop`; avoid touching other registry hives.
 - The app writes a BMP cache under the user profile; do not commit generated files or `target/` artifacts.
+- Theme selection (default: dark) and slideshow state are stored in `settings.json`.
+- While running, changes to folders or slideshow options should take effect immediately.

@@ -1,3 +1,5 @@
+//! Windows wallpaper style and setter helpers.
+
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
@@ -9,17 +11,25 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SystemParametersInfoW, SPI_SETDESKWALLPAPER, SPIF_SENDCHANGE, SPIF_UPDATEINIFILE,
 };
 
+/// Windows wallpaper style modes.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum StyleMode {
+    /// Fill the screen, cropping if needed.
     Fill,
+    /// Fit entire image, preserving aspect.
     Fit,
+    /// Stretch to fill without preserving aspect.
     Stretch,
+    /// Tile the image across the screen.
     Tile,
+    /// Center without scaling.
     Center,
+    /// Span across multiple monitors.
     Span,
 }
 
 impl StyleMode {
+    /// Fixed list of all supported style modes.
     pub const ALL: [StyleMode; 6] = [
         StyleMode::Fill,
         StyleMode::Fit,
@@ -29,6 +39,7 @@ impl StyleMode {
         StyleMode::Span,
     ];
 
+    /// English label used in the UI.
     pub fn label(&self) -> &'static str {
         match self {
             StyleMode::Fill => "Fill",
@@ -41,6 +52,7 @@ impl StyleMode {
     }
 }
 
+/// Apply the Windows registry values for the selected style.
 pub fn set_wallpaper_style(mode: StyleMode) -> Result<()> {
     let (style, tile) = match mode {
         StyleMode::Fill => ("10", "0"),
@@ -58,6 +70,7 @@ pub fn set_wallpaper_style(mode: StyleMode) -> Result<()> {
     Ok(())
 }
 
+/// Apply a BMP wallpaper via SystemParametersInfoW.
 pub fn set_wallpaper(path: &Path) -> Result<()> {
     let wide_path = to_wide_null(path);
     unsafe {
@@ -72,6 +85,7 @@ pub fn set_wallpaper(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Convert a UTF-8 path to a wide null-terminated string.
 fn to_wide_null(path: &Path) -> Vec<u16> {
     OsStr::new(path)
         .encode_wide()

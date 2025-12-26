@@ -1,60 +1,47 @@
-use std::path::PathBuf;
+//! UI orchestration for the wallpaper manager.
+
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::Result;
 use eframe::egui::{self, FontData, FontDefinitions, FontFamily, RichText};
 use eframe::CreationContext;
-use rand::seq::SliceRandom;
-use rand::SeedableRng;
-use rand_chacha::ChaChaRng;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{SetForegroundWindow, ShowWindow, SW_RESTORE};
 
-use crate::i18n::{strings, Language};
-use crate::image_ops::{collect_images, pick_random, process_image, FolderSource};
-use crate::settings::{self, AppSettings, FolderSetting};
+use crate::i18n::{strings, Language, Strings};
+use crate::image_ops::{cached_wallpaper_path, collect_images, pick_random, process_image, FolderSource};
+use crate::settings::{self, AppSettings, ThemeMode};
+use crate::slideshow::{SlideshowEvent, SlideshowWorker};
 use crate::startup;
+use crate::state::AppState;
+use crate::theme::apply_theme;
 use crate::wallpaper::{set_wallpaper, set_wallpaper_style, StyleMode};
 
+/// Main application container that owns UI state and background workers.
 pub struct WallpaperApp {
-    folders: Vec<FolderSource>,
-    single_image: Option<PathBuf>,
-    auto_rotate: bool,
-    random_order: bool,
-    interval_secs: u64,
-    language: Language,
-    style: StyleMode,
-    status: String,
-    running: bool,
-    worker: Option<WorkerHandle>,
+    /// Runtime settings that drive UI and slideshow behavior.
+    state: AppState,
+    /// Persisted settings stored on disk.
     settings: AppSettings,
+    /// Last status text shown to the user.
+    status: String,
+    /// Active slideshow worker, if running.
+    worker: Option<SlideshowWorker>,
+    /// Tray icon handle.
     tray_icon: Option<TrayIcon>,
+    /// Flag set by the tray event thread when restore is requested.
     tray_restore_requested: Arc<AtomicBool>,
+    /// Defer minimizing to tray until after the first frame is shown.
     minimize_pending: bool,
 }
 
-struct WorkerHandle {
-    cmd_tx: Sender<WorkerCommand>,
-    event_rx: Receiver<WorkerEvent>,
-    join: Option<thread::JoinHandle<()>>,
-}
-
-enum WorkerCommand {
-    Stop,
-}
-
-enum WorkerEvent {
-    Info(String),
-    Error(String),
-}
-
 impl WallpaperApp {
+    /// Build the app from persisted settings and OS startup state.
     pub fn new(cc: &CreationContext<'_>, started_from_startup: bool) -> Self {
         configure_fonts(&cc.egui_ctx);
         let mut settings = settings::load();
@@ -64,21 +51,22 @@ impl WallpaperApp {
                 let _ = settings::save(&settings);
             }
         }
-        let language = settings.language;
-        let status = strings(language).status_idle.to_string();
-        apply_theme(&cc.egui_ctx, settings.light_theme);
+
+        let state = AppState::from_settings(&settings);
+        let status = strings(state.language).status_idle.to_string();
+        apply_theme(&cc.egui_ctx, state.theme);
+
         let window_hwnd = window_hwnd_from_context(cc);
-        let tray_icon = create_tray_icon(language);
+        let tray_icon = create_tray_icon(state.language);
         let tray_restore_requested = Arc::new(AtomicBool::new(false));
         if tray_icon.is_some() {
             let restore_flag = Arc::clone(&tray_restore_requested);
-            let hwnd = window_hwnd;
             thread::spawn(move || loop {
                 let Ok(event) = TrayIconEvent::receiver().recv() else {
                     break;
                 };
                 if matches!(event, TrayIconEvent::Click { .. } | TrayIconEvent::DoubleClick { .. }) {
-                    if let Some(hwnd) = hwnd {
+                    if let Some(hwnd) = window_hwnd {
                         unsafe {
                             let _ = ShowWindow(hwnd, SW_RESTORE);
                             let _ = SetForegroundWindow(hwnd);
@@ -88,31 +76,13 @@ impl WallpaperApp {
                 }
             });
         }
+
         let minimize_pending = settings.minimize_to_tray_on_start && started_from_startup;
-        let folders = settings
-            .folders
-            .iter()
-            .map(|folder| FolderSource {
-                path: PathBuf::from(&folder.path),
-                include_subfolders: folder.include_subfolders,
-            })
-            .collect();
-        let single_image = settings
-            .single_image
-            .as_ref()
-            .map(|path| PathBuf::from(path));
-        let should_start = settings.running;
+        let should_start = state.running;
 
         let mut app = Self {
-            folders,
-            single_image,
-            auto_rotate: settings.auto_rotate,
-            random_order: settings.random_order,
-            interval_secs: settings.interval_secs,
-            language: settings.language,
-            style: settings.style,
+            state,
             status,
-            running: false,
             worker: None,
             settings,
             tray_icon,
@@ -123,7 +93,7 @@ impl WallpaperApp {
         if should_start {
             if let Err(err) = app.start_slideshow() {
                 app.status = err.to_string();
-                app.running = false;
+                app.state.running = false;
                 app.settings.running = false;
                 let _ = settings::save(&app.settings);
             }
@@ -132,350 +102,440 @@ impl WallpaperApp {
         app
     }
 
+    /// Render the application UI and react to user input.
     pub fn ui(&mut self, ctx: &egui::Context) {
         self.drain_events();
         self.handle_tray_events(ctx);
 
-        let t = strings(self.language);
+        let t = strings(self.state.language);
+        self.render_top_bar(ctx, &t);
+
+        let mut settings_changed = false;
+        let mut restart_needed = false;
+
+        egui::CentralPanel::default().show(ctx, |ui| {
+            self.render_sources(ui, &t, &mut settings_changed, &mut restart_needed);
+            self.render_slideshow_options(ui, &t, &mut settings_changed, &mut restart_needed);
+            self.render_startup_section(ui, &t);
+            self.render_style_selector(ui, &t, &mut settings_changed, &mut restart_needed);
+            self.render_controls(ui, &t);
+
+            ui.separator();
+            ui.label(format!("Status: {}", self.status));
+        });
+
+        if settings_changed {
+            if restart_needed {
+                self.restart_slideshow_if_running();
+            }
+            self.persist_settings();
+        }
+    }
+
+    /// Render the language and theme selectors.
+    fn render_top_bar(&mut self, ctx: &egui::Context, t: &Strings) {
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.heading(RichText::new(t.title).strong());
             ui.horizontal(|ui| {
                 ui.label(t.language);
                 egui::ComboBox::from_id_source("language_combo")
-                    .selected_text(match self.language {
+                    .selected_text(match self.state.language {
                         Language::En => "English",
                         Language::Cht => "繁體中文",
                     })
                     .show_ui(ui, |ui| {
-                        let mut language_changed = false;
+                        let mut changed = false;
                         if ui
-                            .selectable_value(&mut self.language, Language::En, "English")
+                            .selectable_value(&mut self.state.language, Language::En, "English")
                             .changed()
                         {
-                            language_changed = true;
+                            changed = true;
                         }
                         if ui
-                            .selectable_value(&mut self.language, Language::Cht, "繁體中文")
+                            .selectable_value(&mut self.state.language, Language::Cht, "繁體中文")
                             .changed()
                         {
-                            language_changed = true;
+                            changed = true;
                         }
-                        if language_changed {
+                        if changed {
                             self.persist_settings();
                         }
                     });
             });
+
             ui.horizontal(|ui| {
                 ui.label(t.theme);
+                let theme_text = match self.state.theme {
+                    ThemeMode::Light => t.theme_light,
+                    ThemeMode::Dark => t.theme_dark,
+                };
                 let mut changed = false;
-                if ui
-                    .selectable_label(self.settings.light_theme, t.theme_light)
-                    .clicked()
-                {
-                    self.settings.light_theme = true;
-                    changed = true;
-                }
-                if ui
-                    .selectable_label(!self.settings.light_theme, t.theme_dark)
-                    .clicked()
-                {
-                    self.settings.light_theme = false;
-                    changed = true;
-                }
+                egui::ComboBox::from_id_source("theme_combo")
+                    .selected_text(theme_text)
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .selectable_value(&mut self.state.theme, ThemeMode::Light, t.theme_light)
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                        if ui
+                            .selectable_value(&mut self.state.theme, ThemeMode::Dark, t.theme_dark)
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                    });
                 if changed {
-                    apply_theme(ctx, self.settings.light_theme);
+                    apply_theme(ctx, self.state.theme);
                     self.persist_settings();
                 }
             });
         });
+    }
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            let mut settings_changed = false;
-            ui.horizontal(|ui| {
-                if ui.button(t.add_folder).clicked() {
-                    if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                        self.folders.push(FolderSource {
+    /// Render folder and single-image selection UI.
+    fn render_sources(
+        &mut self,
+        ui: &mut egui::Ui,
+        t: &Strings,
+        settings_changed: &mut bool,
+        restart_needed: &mut bool,
+    ) {
+        ui.horizontal(|ui| {
+            if ui.button(t.add_folder).clicked() {
+                if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                    self.state.folders.push(FolderSource {
+                        path,
+                        include_subfolders: true,
+                    });
+                    *settings_changed = true;
+                    *restart_needed = true;
+                }
+            }
+            if ui.button(t.add_folders).clicked() {
+                if let Some(paths) = rfd::FileDialog::new().pick_folders() {
+                    if !paths.is_empty() {
+                        *settings_changed = true;
+                        *restart_needed = true;
+                    }
+                    for path in paths {
+                        self.state.folders.push(FolderSource {
                             path,
                             include_subfolders: true,
                         });
-                        settings_changed = true;
                     }
                 }
-                if ui.button(t.add_folders).clicked() {
-                    if let Some(paths) = rfd::FileDialog::new().pick_folders() {
-                        if !paths.is_empty() {
-                            settings_changed = true;
-                        }
-                        for path in paths {
-                            self.folders.push(FolderSource {
-                                path,
-                                include_subfolders: true,
-                            });
-                        }
-                    }
-                }
-                if ui.button(t.add_image).clicked() {
-                    if let Some(path) = rfd::FileDialog::new().add_filter("Images", &["png", "jpg", "jpeg", "bmp", "gif", "tif", "tiff", "webp"]).pick_file() {
-                        self.single_image = Some(path);
-                        settings_changed = true;
-                    }
-                }
-                if ui.button(t.clear_all).clicked() {
-                    self.folders.clear();
-                    self.single_image = None;
-                    settings_changed = true;
-                }
-            });
-
-            ui.separator();
-
-            egui::ScrollArea::vertical().id_source("folder_list").show(ui, |ui| {
-                let mut to_remove = Vec::new();
-                for (idx, folder) in self.folders.iter_mut().enumerate() {
-                    ui.horizontal(|ui| {
-                        ui.label(folder.path.display().to_string());
-                        if ui
-                            .checkbox(&mut folder.include_subfolders, t.include_subfolders)
-                            .changed()
-                        {
-                            settings_changed = true;
-                        }
-                        if ui.button(t.remove).clicked() {
-                            to_remove.push(idx);
-                        }
-                    });
-                }
-                for idx in to_remove.into_iter().rev() {
-                    self.folders.remove(idx);
-                    settings_changed = true;
-                }
-                let mut clear_single = false;
-                if let Some(img) = self.single_image.as_ref() {
-                    let label = format!("Single: {}", img.display());
-                    ui.horizontal(|ui| {
-                        ui.label(label);
-                        if ui.button(t.remove).clicked() {
-                            clear_single = true;
-                        }
-                    });
-                }
-                if clear_single {
-                    self.single_image = None;
-                    settings_changed = true;
-                }
-            });
-
-            ui.separator();
-
-            ui.horizontal(|ui| {
-                if ui.checkbox(&mut self.auto_rotate, t.auto_rotate).changed() {
-                    settings_changed = true;
-                }
-                if ui.checkbox(&mut self.random_order, t.random_order).changed() {
-                    settings_changed = true;
-                }
-            });
-
-            ui.horizontal(|ui| {
-                ui.label(t.slideshow);
-                if ui
-                    .add(egui::Slider::new(&mut self.interval_secs, 5..=7200).text(t.interval_seconds))
-                    .changed()
-                {
-                    settings_changed = true;
-                }
-            });
-
-            ui.separator();
-            ui.label(t.startup);
-            ui.horizontal(|ui| {
-                if ui
-                    .checkbox(&mut self.settings.run_on_startup, t.run_on_startup)
-                    .changed()
-                {
-                    let result = if self.settings.run_on_startup {
-                        startup::enable()
-                    } else {
-                        startup::disable()
-                    };
-                    if let Err(err) = result {
-                        self.status = err.to_string();
-                        self.settings.run_on_startup = !self.settings.run_on_startup;
-                    } else if let Err(err) = settings::save(&self.settings) {
-                        self.status = err.to_string();
-                    }
-                }
-                if ui
-                    .checkbox(
-                        &mut self.settings.minimize_to_tray_on_start,
-                        t.minimize_to_tray_on_start,
-                    )
-                    .changed()
-                {
-                    if let Err(err) = settings::save(&self.settings) {
-                        self.status = err.to_string();
-                    }
-                }
-            });
-            if ui.button(t.minimize_to_tray).clicked() {
-                self.minimize_to_tray(ctx);
             }
+            if ui.button(t.add_image).clicked() {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Images", &[
+                        "png", "jpg", "jpeg", "bmp", "gif", "tif", "tiff", "webp",
+                    ])
+                    .pick_file()
+                {
+                    self.state.single_image = Some(path);
+                    *settings_changed = true;
+                    *restart_needed = true;
+                }
+            }
+            if ui.button(t.clear_all).clicked() {
+                self.state.folders.clear();
+                self.state.single_image = None;
+                *settings_changed = true;
+                *restart_needed = true;
+            }
+        });
 
-            egui::ComboBox::from_label(t.style)
-                .selected_text(style_label(self.style, self.language))
-                .show_ui(ui, |ui| {
-                    for mode in StyleMode::ALL {
-                        if ui
-                            .selectable_value(&mut self.style, mode, style_label(mode, self.language))
-                            .changed()
-                        {
-                            settings_changed = true;
-                        }
+        ui.separator();
+
+        egui::ScrollArea::vertical().id_source("folder_list").show(ui, |ui| {
+            let mut to_remove = Vec::new();
+            for (idx, folder) in self.state.folders.iter_mut().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.label(folder.path.display().to_string());
+                    if ui
+                        .checkbox(&mut folder.include_subfolders, t.include_subfolders)
+                        .changed()
+                    {
+                        *settings_changed = true;
+                        *restart_needed = true;
+                    }
+                    if ui.button(t.remove).clicked() {
+                        to_remove.push(idx);
                     }
                 });
+            }
+            for idx in to_remove.into_iter().rev() {
+                self.state.folders.remove(idx);
+                *settings_changed = true;
+                *restart_needed = true;
+            }
 
-            ui.separator();
-
-            ui.horizontal(|ui| {
-                if ui.button(t.apply_once).clicked() {
-                    match self.apply_once() {
-                        Ok(_) => self.status = format!("{} ({})", t.apply_once, t.status_idle),
-                        Err(err) => self.status = err.to_string(),
+            let mut clear_single = false;
+            if let Some(img) = self.state.single_image.as_ref() {
+                let label = format!("Single: {}", img.display());
+                ui.horizontal(|ui| {
+                    ui.label(label);
+                    if ui.button(t.remove).clicked() {
+                        clear_single = true;
                     }
-                }
-
-                if self.running {
-                    if ui.button(t.stop).clicked() {
-                        self.stop_worker();
-                        self.status = t.status_idle.to_string();
-                        self.persist_settings();
-                    }
-                } else if ui.button(t.start).clicked() {
-                    match self.start_slideshow() {
-                        Ok(_) => {
-                            self.running = true;
-                            self.status = t.status_running.to_string();
-                            self.persist_settings();
-                        }
-                        Err(err) => self.status = err.to_string(),
-                    }
-                }
-            });
-
-            ui.separator();
-            ui.label(format!("Status: {}", self.status));
-
-            if settings_changed {
-                self.persist_settings();
+                });
+            }
+            if clear_single {
+                self.state.single_image = None;
+                *settings_changed = true;
+                *restart_needed = true;
             }
         });
     }
 
+    /// Render slideshow toggles and interval slider.
+    fn render_slideshow_options(
+        &mut self,
+        ui: &mut egui::Ui,
+        t: &Strings,
+        settings_changed: &mut bool,
+        restart_needed: &mut bool,
+    ) {
+        ui.separator();
+
+        ui.horizontal(|ui| {
+            if ui.checkbox(&mut self.state.auto_rotate, t.auto_rotate).changed() {
+                *settings_changed = true;
+                *restart_needed = true;
+            }
+            if ui.checkbox(&mut self.state.random_order, t.random_order).changed() {
+                *settings_changed = true;
+                *restart_needed = true;
+            }
+        });
+
+        ui.horizontal(|ui| {
+            ui.label(t.slideshow);
+            if ui
+                .add(egui::Slider::new(&mut self.state.interval_secs, 5..=7200).text(t.interval_seconds))
+                .changed()
+            {
+                *settings_changed = true;
+                *restart_needed = true;
+            }
+        });
+    }
+
+    /// Render startup-related options (run on startup, minimize to tray).
+    fn render_startup_section(&mut self, ui: &mut egui::Ui, t: &Strings) {
+        ui.separator();
+        ui.label(t.startup);
+        ui.horizontal(|ui| {
+            if ui
+                .checkbox(&mut self.settings.run_on_startup, t.run_on_startup)
+                .changed()
+            {
+                let result = if self.settings.run_on_startup {
+                    startup::enable()
+                } else {
+                    startup::disable()
+                };
+                if let Err(err) = result {
+                    self.status = err.to_string();
+                    self.settings.run_on_startup = !self.settings.run_on_startup;
+                } else if let Err(err) = settings::save(&self.settings) {
+                    self.status = err.to_string();
+                }
+            }
+            if ui
+                .checkbox(
+                    &mut self.settings.minimize_to_tray_on_start,
+                    t.minimize_to_tray_on_start,
+                )
+                .changed()
+            {
+                if let Err(err) = settings::save(&self.settings) {
+                    self.status = err.to_string();
+                }
+            }
+        });
+        if ui.button(t.minimize_to_tray).clicked() {
+            self.minimize_to_tray(ui.ctx());
+        }
+    }
+
+    /// Render the wallpaper style selection and apply it immediately.
+    fn render_style_selector(
+        &mut self,
+        ui: &mut egui::Ui,
+        t: &Strings,
+        settings_changed: &mut bool,
+        restart_needed: &mut bool,
+    ) {
+        let mut style_changed = false;
+        egui::ComboBox::from_label(t.style)
+            .selected_text(style_label(self.state.style, self.state.language))
+            .show_ui(ui, |ui| {
+                for mode in StyleMode::ALL {
+                    if ui
+                        .selectable_value(&mut self.state.style, mode, style_label(mode, self.state.language))
+                        .changed()
+                    {
+                        style_changed = true;
+                    }
+                }
+            });
+        if style_changed {
+            *settings_changed = true;
+            *restart_needed = true;
+            if let Err(err) = set_wallpaper_style(self.state.style) {
+                self.status = err.to_string();
+            } else if !self.state.running {
+                // Reapply the cached wallpaper so the new style takes effect immediately.
+                if let Ok(cache_path) = cached_wallpaper_path() {
+                    if cache_path.exists() {
+                        let _ = set_wallpaper(&cache_path);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Render action buttons (apply once, next, start/stop).
+    fn render_controls(&mut self, ui: &mut egui::Ui, t: &Strings) {
+        ui.separator();
+
+        ui.horizontal(|ui| {
+            if ui.button(t.apply_once).clicked() {
+                match self.apply_once() {
+                    Ok(_) => self.status = format!("{} ({})", t.apply_once, t.status_idle),
+                    Err(err) => self.status = err.to_string(),
+                }
+            }
+
+            if ui.button(t.next_image).clicked() {
+                self.request_next();
+            }
+
+            if self.state.running {
+                if ui.button(t.stop).clicked() {
+                    self.stop_worker();
+                    self.status = t.status_idle.to_string();
+                    self.persist_settings();
+                }
+            } else if ui.button(t.start).clicked() {
+                match self.start_slideshow() {
+                    Ok(_) => {
+                        self.state.running = true;
+                        self.status = t.status_running.to_string();
+                        self.persist_settings();
+                    }
+                    Err(err) => self.status = err.to_string(),
+                }
+            }
+        });
+    }
+
+    /// Apply a single wallpaper immediately, without starting the slideshow.
     fn apply_once(&mut self) -> Result<()> {
-        let images = collect_images(&self.folders, self.single_image.as_deref())?;
+        let images = collect_images(&self.state.folders, self.state.single_image.as_deref())?;
         if images.is_empty() {
-            let t = strings(self.language);
+            let t = strings(self.state.language);
             return Err(anyhow::anyhow!(t.no_images));
         }
-        set_wallpaper_style(self.style)?;
+        set_wallpaper_style(self.state.style)?;
         let choice = pick_random(&images, None)?;
-        let processed = process_image(&choice, self.auto_rotate)?;
+        let processed = process_image(&choice, self.state.auto_rotate)?;
         set_wallpaper(&processed)?;
         Ok(())
     }
 
+    /// Advance the slideshow or apply a single image when idle.
+    fn request_next(&mut self) {
+        if let Some(worker) = &self.worker {
+            worker.request_next();
+        } else {
+            match self.apply_once() {
+                Ok(_) => {
+                    let t = strings(self.state.language);
+                    self.status = format!("{} ({})", t.next_image, t.status_idle);
+                }
+                Err(err) => self.status = err.to_string(),
+            }
+        }
+    }
+
+    /// Start (or restart) the slideshow worker.
     fn start_slideshow(&mut self) -> Result<()> {
         self.stop_worker();
-        let images = collect_images(&self.folders, self.single_image.as_deref())?;
+        let images = collect_images(&self.state.folders, self.state.single_image.as_deref())?;
         if images.is_empty() {
-            let t = strings(self.language);
+            let t = strings(self.state.language);
             return Err(anyhow::anyhow!(t.no_images));
         }
 
-        set_wallpaper_style(self.style)?;
+        let worker = SlideshowWorker::start(
+            images,
+            self.state.auto_rotate,
+            self.state.style,
+            Duration::from_secs(self.state.interval_secs),
+            self.state.random_order,
+        )?;
 
-        let (cmd_tx, cmd_rx) = mpsc::channel();
-        let (evt_tx, evt_rx) = mpsc::channel();
-
-        let auto_rotate = self.auto_rotate;
-        let style = self.style;
-        let interval = Duration::from_secs(self.interval_secs);
-        let random_order = self.random_order;
-
-        let handle = thread::spawn(move || {
-            let _ = run_worker(
-                images,
-                auto_rotate,
-                style,
-                interval,
-                random_order,
-                cmd_rx,
-                evt_tx,
-            );
-        });
-
-        self.worker = Some(WorkerHandle {
-            cmd_tx,
-            event_rx: evt_rx,
-            join: Some(handle),
-        });
-        self.running = true;
+        self.worker = Some(worker);
+        self.state.running = true;
         Ok(())
     }
 
+    /// Stop the slideshow worker without blocking the UI thread.
     fn stop_worker(&mut self) {
         if let Some(worker) = self.worker.take() {
-            let _ = worker.cmd_tx.send(WorkerCommand::Stop);
-            if let Some(join) = worker.join {
-                let _ = join.join();
-            }
+            worker.stop();
         }
-        self.running = false;
+        self.state.running = false;
     }
 
+    /// Restart the slideshow if it is currently running.
+    fn restart_slideshow_if_running(&mut self) {
+        if !self.state.running {
+            return;
+        }
+        match self.start_slideshow() {
+            Ok(_) => {
+                let t = strings(self.state.language);
+                self.status = t.status_running.to_string();
+            }
+            Err(err) => {
+                self.status = err.to_string();
+                self.state.running = false;
+            }
+        }
+    }
+
+    /// Persist the current runtime state into the settings file.
     fn persist_settings(&mut self) {
-        self.settings.folders = self
-            .folders
-            .iter()
-            .map(|folder| FolderSetting {
-                path: folder.path.to_string_lossy().to_string(),
-                include_subfolders: folder.include_subfolders,
-            })
-            .collect();
-        self.settings.single_image = self
-            .single_image
-            .as_ref()
-            .map(|path| path.to_string_lossy().to_string());
-        self.settings.auto_rotate = self.auto_rotate;
-        self.settings.random_order = self.random_order;
-        self.settings.interval_secs = self.interval_secs;
-        self.settings.language = self.language;
-        self.settings.style = self.style;
-        self.settings.running = self.running;
+        self.state.apply_to_settings(&mut self.settings);
         if let Err(err) = settings::save(&self.settings) {
             self.status = err.to_string();
         }
     }
 
+    /// Drain background worker events into UI state.
     fn drain_events(&mut self) {
         let mut events = Vec::new();
         if let Some(worker) = &self.worker {
-            while let Ok(evt) = worker.event_rx.try_recv() {
-                events.push(evt);
-            }
+            worker.drain_events(&mut events);
         }
         for evt in events {
             match evt {
-                WorkerEvent::Info(msg) => self.status = msg,
-                WorkerEvent::Error(msg) => {
+                SlideshowEvent::Info(msg) => self.status = msg,
+                SlideshowEvent::Error(msg) => {
                     self.status = msg;
-                    self.running = false;
+                    self.state.running = false;
                     self.persist_settings();
                 }
             }
         }
     }
 
+    /// Handle minimize and restore events from the tray icon.
     fn handle_tray_events(&mut self, ctx: &egui::Context) {
         if let Some(minimized) = ctx.input(|i| i.viewport().minimized) {
             if minimized {
@@ -488,15 +548,12 @@ impl WallpaperApp {
             self.minimize_to_tray(ctx);
         }
 
-        if self
-            .tray_restore_requested
-            .swap(false, Ordering::SeqCst)
-        {
+        if self.tray_restore_requested.swap(false, Ordering::SeqCst) {
             self.restore_from_tray(ctx);
         }
-
     }
 
+    /// Hide the window and show the tray icon.
     fn minimize_to_tray(&mut self, ctx: &egui::Context) {
         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
@@ -505,6 +562,7 @@ impl WallpaperApp {
         }
     }
 
+    /// Restore the window from the tray icon.
     fn restore_from_tray(&mut self, ctx: &egui::Context) {
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
@@ -515,6 +573,7 @@ impl WallpaperApp {
     }
 }
 
+/// Configure fonts so CJK text renders correctly when available.
 fn configure_fonts(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
     let candidates = [
@@ -559,14 +618,7 @@ fn configure_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
-fn apply_theme(ctx: &egui::Context, light: bool) {
-    if light {
-        ctx.set_visuals(egui::Visuals::light());
-    } else {
-        ctx.set_visuals(egui::Visuals::dark());
-    }
-}
-
+/// Extract the Win32 HWND for native window operations.
 fn window_hwnd_from_context(cc: &CreationContext<'_>) -> Option<HWND> {
     let handle = cc.window_handle().ok()?;
     match handle.as_raw() {
@@ -576,17 +628,20 @@ fn window_hwnd_from_context(cc: &CreationContext<'_>) -> Option<HWND> {
 }
 
 impl Drop for WallpaperApp {
+    /// Ensure the worker thread is stopped before shutdown.
     fn drop(&mut self) {
         self.stop_worker();
     }
 }
 
 impl eframe::App for WallpaperApp {
+    /// egui frame entry point.
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.ui(ctx);
     }
 }
 
+/// Create a tray icon with a fallback in-memory bitmap.
 fn create_tray_icon(language: Language) -> Option<TrayIcon> {
     let icon = default_tray_icon()?;
     let t = strings(language);
@@ -602,10 +657,10 @@ fn create_tray_icon(language: Language) -> Option<TrayIcon> {
     })
 }
 
+/// Build a simple fallback tray icon (white border, blue fill).
 fn default_tray_icon() -> Option<Icon> {
     let size = 16u32;
     let mut rgba = Vec::with_capacity((size * size * 4) as usize);
-    // Simple fallback icon so the tray is always visible.
     for y in 0..size {
         for x in 0..size {
             let border = x == 0 || y == 0 || x == size - 1 || y == size - 1;
@@ -616,97 +671,7 @@ fn default_tray_icon() -> Option<Icon> {
     Icon::from_rgba(rgba, size, size).ok()
 }
 
-fn run_worker(
-    images: Vec<PathBuf>,
-    auto_rotate: bool,
-    style: StyleMode,
-    interval: Duration,
-    random_order: bool,
-    cmd_rx: Receiver<WorkerCommand>,
-    evt_tx: Sender<WorkerEvent>,
-) -> Result<()> {
-    if let Err(err) = set_wallpaper_style(style) {
-        let _ = evt_tx.send(WorkerEvent::Error(err.to_string()));
-        return Ok(());
-    }
-    let mut last: Option<PathBuf> = None;
-    let mut rng = ChaChaRng::from_entropy();
-    loop {
-        if matches!(cmd_rx.try_recv(), Ok(WorkerCommand::Stop)) {
-            break;
-        }
-
-        let next = if random_order {
-            pick_random_with_rng(&images, last.as_ref(), &mut rng)?
-        } else {
-            sequential_pick(&images, last.as_ref())
-        };
-
-        let processed = process_image(&next, auto_rotate)?;
-        if let Err(err) = set_wallpaper(&processed) {
-            let _ = evt_tx.send(WorkerEvent::Error(err.to_string()));
-            break;
-        }
-        let _ = evt_tx.send(WorkerEvent::Info(format!(
-            "Set: {}",
-            next.display()
-        )));
-        last = Some(next);
-
-        if wait_or_stop(&cmd_rx, interval) {
-            break;
-        }
-    }
-    Ok(())
-}
-
-fn wait_or_stop(cmd_rx: &Receiver<WorkerCommand>, interval: Duration) -> bool {
-    let step = Duration::from_millis(500);
-    let start = Instant::now();
-    while start.elapsed() < interval {
-        if matches!(cmd_rx.try_recv(), Ok(WorkerCommand::Stop)) {
-            return true;
-        }
-        let remaining = interval.saturating_sub(start.elapsed());
-        thread::sleep(step.min(remaining));
-    }
-    false
-}
-
-fn sequential_pick(images: &[PathBuf], last: Option<&PathBuf>) -> PathBuf {
-    if images.is_empty() {
-        return PathBuf::new();
-    }
-    if let Some(last) = last {
-        if let Some(pos) = images.iter().position(|p| p == last) {
-            return images[(pos + 1) % images.len()].clone();
-        }
-    }
-    images[0].clone()
-}
-
-fn pick_random_with_rng(
-    images: &[PathBuf],
-    last: Option<&PathBuf>,
-    rng: &mut ChaChaRng,
-) -> Result<PathBuf> {
-    if images.len() == 1 {
-        return Ok(images[0].clone());
-    }
-    for _ in 0..5 {
-        let candidate = images
-            .choose(rng)
-            .ok_or_else(|| anyhow::anyhow!("no images available"))?;
-        if Some(candidate) != last {
-            return Ok(candidate.clone());
-        }
-    }
-    images
-        .choose(rng)
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("no images available"))
-}
-
+/// Map a style enum to its label, honoring language-specific labels.
 fn style_label(mode: StyleMode, lang: Language) -> &'static str {
     match (mode, lang) {
         (StyleMode::Fill, Language::Cht) => "填滿",
@@ -718,6 +683,3 @@ fn style_label(mode: StyleMode, lang: Language) -> &'static str {
         (m, _) => m.label(),
     }
 }
-
-
-

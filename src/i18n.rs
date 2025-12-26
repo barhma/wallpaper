@@ -1,9 +1,15 @@
+//! Static UI strings and language selection.
+
+/// Supported UI languages.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Language {
+    /// English.
     En,
+    /// Traditional Chinese.
     Cht,
 }
 
+/// Bundle of localized strings used by the UI.
 pub struct Strings {
     pub title: &'static str,
     pub add_folder: &'static str,
@@ -28,11 +34,13 @@ pub struct Strings {
     pub theme: &'static str,
     pub theme_light: &'static str,
     pub theme_dark: &'static str,
+    pub next_image: &'static str,
     pub status_idle: &'static str,
     pub status_running: &'static str,
     pub no_images: &'static str,
 }
 
+/// Return the string bundle for the requested language.
 pub fn strings(lang: Language) -> Strings {
     match lang {
         Language::En => Strings {
@@ -59,6 +67,7 @@ pub fn strings(lang: Language) -> Strings {
             theme: "Theme",
             theme_light: "Light",
             theme_dark: "Dark",
+            next_image: "Next",
             status_idle: "Idle",
             status_running: "Slideshow running",
             no_images: "No images selected",
@@ -87,6 +96,7 @@ pub fn strings(lang: Language) -> Strings {
             theme: "主題",
             theme_light: "淺色",
             theme_dark: "深色",
+            next_image: "下一張",
             status_idle: "待命中",
             status_running: "幻燈片進行中",
             no_images: "沒有可用圖片",

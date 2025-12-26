@@ -14,6 +14,8 @@ Windows wallpaper manager built in Rust with a native GUI (egui). Designed for W
 - Windows wallpaper style: Fill, Fit, Stretch, Tile, Center, Span
 - English and Traditional Chinese UI
 - Persisted selections and slideshow state between runs
+- Light/dark theme with dark as the default
+- Next image button for manual advance
 
 ## Build and Run
 
@@ -38,9 +40,12 @@ cargo build --release
 ## Usage
 
 - Add folders or a single image, then click Start to begin the slideshow.
+- Click Next to advance the slideshow immediately (or set one image when idle).
 - Use Remove next to a folder or single image to delete that entry.
 - Use Clear to reset all selections.
+- Use the Theme selector (Light/Dark). Dark is the default.
 - Minimize to tray to keep the slideshow running in the background.
+- While the slideshow is running, changes to folders or options apply immediately.
 
 ## Configuration Tips
 
@@ -51,6 +56,7 @@ cargo build --release
 
 - Settings are saved under the user config directory (ProjectDirs) as `settings.json`.
 - Saved state includes folder list, single image, slideshow options, language, style, and whether the slideshow is running.
+- Theme selection is saved and restored on launch.
 - On startup, the app restores the last state and resumes the slideshow if it was running.
 - The app also writes a BMP cache file under the user cache directory as `current.bmp`.
 

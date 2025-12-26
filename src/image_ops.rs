@@ -1,3 +1,5 @@
+//! Image discovery and processing utilities.
+
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
@@ -7,12 +9,16 @@ use image::ImageFormat;
 use rand::seq::SliceRandom;
 use walkdir::WalkDir;
 
+/// Folder input definition used by the UI and settings.
 #[derive(Clone, Debug)]
 pub struct FolderSource {
+    /// Folder path to scan.
     pub path: PathBuf,
+    /// Whether to include subfolders when scanning.
     pub include_subfolders: bool,
 }
 
+/// Collect all matching images from folders and an optional single file.
 pub fn collect_images(
     folders: &[FolderSource],
     single_image: Option<&Path>,
@@ -50,6 +56,7 @@ pub fn collect_images(
     Ok(images)
 }
 
+/// Return true when the file extension is a supported image type.
 pub fn is_supported_image(path: &Path) -> bool {
     match path.extension().and_then(OsStr::to_str) {
         Some(ext) => matches!(
@@ -60,6 +67,7 @@ pub fn is_supported_image(path: &Path) -> bool {
     }
 }
 
+/// Pick a random image, avoiding the previous image when possible.
 pub fn pick_random(images: &[PathBuf], last: Option<&PathBuf>) -> Result<PathBuf> {
     let mut rng = rand::thread_rng();
     if images.len() == 1 {
@@ -79,6 +87,7 @@ pub fn pick_random(images: &[PathBuf], last: Option<&PathBuf>) -> Result<PathBuf
         .clone())
 }
 
+/// Load, optionally rotate, and cache an image as a BMP for Windows.
 pub fn process_image(path: &Path, auto_rotate: bool) -> Result<PathBuf> {
     let mut img = image::open(path)
         .with_context(|| format!("failed to open {}", path.display()))?;
@@ -94,6 +103,12 @@ pub fn process_image(path: &Path, auto_rotate: bool) -> Result<PathBuf> {
     Ok(cache_path)
 }
 
+/// Resolve the cached wallpaper path used for reapplying styles.
+pub fn cached_wallpaper_path() -> Result<PathBuf> {
+    cache_file_path()
+}
+
+/// Resolve the cache path used to store the BMP wallpaper.
 fn cache_file_path() -> Result<PathBuf> {
     let dirs = ProjectDirs::from("dev", "wallpaper_manager", "wallpaper_manager")
         .ok_or_else(|| anyhow!("cannot determine cache directory"))?;

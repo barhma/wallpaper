@@ -1,12 +1,17 @@
+//! Entry point for the Windows wallpaper manager.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
 mod i18n;
 mod image_ops;
+mod slideshow;
 mod settings;
+mod state;
 mod startup;
+mod theme;
 mod wallpaper;
 
+/// Configure the native window and start the egui runtime.
 fn main() -> anyhow::Result<()> {
     let started_from_startup = std::env::args().any(|arg| arg == "--startup");
     let native_options = eframe::NativeOptions {
