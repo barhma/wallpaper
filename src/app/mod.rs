@@ -465,14 +465,9 @@ impl WallpaperApp {
     /// Start (or restart) the slideshow worker.
     fn start_slideshow(&mut self) -> Result<()> {
         self.stop_worker();
-        let images = collect_images(&self.state.folders, self.state.single_image.as_deref())?;
-        if images.is_empty() {
-            let t = strings(self.state.language);
-            return Err(anyhow::anyhow!(t.no_images));
-        }
-
         let worker = SlideshowWorker::start(
-            images,
+            self.state.folders.clone(),
+            self.state.single_image.clone(),
             self.state.auto_rotate,
             self.state.style,
             Duration::from_secs(self.state.interval_secs),

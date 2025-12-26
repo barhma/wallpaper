@@ -73,12 +73,12 @@ cargo build --release
 ## Project Structure
 
 - `src/main.rs`: app entry point
-- `src/app.rs`: GUI and slideshow control
-- `src/image_ops.rs`: file discovery, random pick, image processing
-- `src/wallpaper.rs`: Windows wallpaper style + setter
-- `src/i18n.rs`: English/Traditional Chinese strings
-- `src/settings.rs`: persisted app settings
-- `src/startup.rs`: Windows startup registry integration
+- `src/app/mod.rs`: GUI and slideshow control
+- `src/image_ops/mod.rs`: file discovery, random pick, image processing
+- `src/wallpaper/wallpaper.rs`: Windows wallpaper style + setter
+- `src/i18n/mod.rs`: English/Traditional Chinese strings
+- `src/settings/mod.rs`: persisted app settings
+- `src/startup/mod.rs`: Windows startup registry integration
 
 ## Contributing
 

@@ -5,12 +5,12 @@ This repo is a Windows-only Rust desktop app for managing wallpapers via an egui
 ## Project Structure & Module Organization
 
 - `src/main.rs`: application entry point and runtime wiring.
-- `src/app.rs`: GUI and slideshow control flow.
-- `src/image_ops.rs`: file discovery, random selection, image transforms.
-- `src/wallpaper.rs`: Windows wallpaper styles and setter logic.
-- `src/i18n.rs`: English/Traditional Chinese strings.
-- `src/settings.rs`: persisted settings model.
-- `src/startup.rs`: Windows startup registry integration.
+- `src/app/mod.rs`: GUI and slideshow control flow.
+- `src/image_ops/mod.rs`: file discovery, random selection, image transforms.
+- `src/wallpaper/wallpaper.rs`: Windows wallpaper styles and setter logic.
+- `src/i18n/mod.rs`: English/Traditional Chinese strings.
+- `src/settings/mod.rs`: persisted settings model.
+- `src/startup/mod.rs`: Windows startup registry integration.
 - `src/image/`: image assets used by the app.
 - `Cargo.toml`/`Cargo.lock`: dependencies; build output goes to `target/`.
 

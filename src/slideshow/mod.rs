@@ -10,7 +10,7 @@ use rand::seq::SliceRandom;
 use rand::SeedableRng;
 use rand_chacha::ChaChaRng;
 
-use crate::image_ops::process_image;
+use crate::image_ops::{collect_images, process_image, FolderSource};
 use crate::wallpaper::{set_wallpaper, set_wallpaper_style, StyleMode};
 
 /// Command messages sent to the slideshow worker.
@@ -42,7 +42,8 @@ pub struct SlideshowWorker {
 impl SlideshowWorker {
     /// Spawn a slideshow worker and return a handle for control/event polling.
     pub fn start(
-        images: Vec<PathBuf>,
+        folders: Vec<FolderSource>,
+        single_image: Option<PathBuf>,
         auto_rotate: bool,
         style: StyleMode,
         interval: Duration,
@@ -54,7 +55,15 @@ impl SlideshowWorker {
         let (evt_tx, evt_rx) = mpsc::channel();
 
         let handle = thread::spawn(move || {
-            let _ = run_worker(images, auto_rotate, interval, random_order, cmd_rx, evt_tx);
+            let _ = run_worker(
+                folders,
+                single_image,
+                auto_rotate,
+                interval,
+                random_order,
+                cmd_rx,
+                evt_tx,
+            );
         });
 
         Ok(Self {
@@ -89,13 +98,26 @@ impl SlideshowWorker {
 
 /// Main worker loop that processes images and applies wallpapers.
 fn run_worker(
-    images: Vec<PathBuf>,
+    folders: Vec<FolderSource>,
+    single_image: Option<PathBuf>,
     auto_rotate: bool,
     interval: Duration,
     random_order: bool,
     cmd_rx: Receiver<SlideshowCommand>,
     evt_tx: Sender<SlideshowEvent>,
 ) -> Result<()> {
+    let images = match collect_images(&folders, single_image.as_deref()) {
+        Ok(images) => images,
+        Err(err) => {
+            let _ = evt_tx.send(SlideshowEvent::Error(err.to_string()));
+            return Ok(());
+        }
+    };
+    if images.is_empty() {
+        let _ = evt_tx.send(SlideshowEvent::Error("No images selected".to_string()));
+        return Ok(());
+    }
+
     let mut last: Option<PathBuf> = None;
     let mut rng = ChaChaRng::from_entropy();
     let mut skip_wait = false;
