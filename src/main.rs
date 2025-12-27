@@ -16,8 +16,8 @@ fn main() -> anyhow::Result<()> {
     let started_from_startup = std::env::args().any(|arg| arg == "--startup");
     let native_options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([760.0, 720.0])
-            .with_min_inner_size([620.0, 520.0]),
+            .with_inner_size([680.0, 600.0])
+            .with_min_inner_size([540.0, 460.0]),
         ..Default::default()
     };
     eframe::run_native(

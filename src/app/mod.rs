@@ -1,26 +1,31 @@
 //! UI orchestration for the wallpaper manager.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
 use anyhow::Result;
-use eframe::egui::{self, FontData, FontDefinitions, FontFamily, RichText};
 use eframe::CreationContext;
+use eframe::egui::{self, FontData, FontDefinitions, FontFamily, RichText};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder, TrayIconEvent};
-use windows::Win32::Foundation::HWND;
-use windows::Win32::UI::WindowsAndMessaging::{SetForegroundWindow, ShowWindow, SW_RESTORE};
+use windows::Win32::Foundation::{COLORREF, HWND};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GWL_EXSTYLE, GetWindowLongW, LWA_ALPHA, SW_RESTORE, SetForegroundWindow,
+    SetLayeredWindowAttributes, SetWindowLongW, ShowWindow, WS_EX_LAYERED,
+};
 
-use crate::i18n::{strings, Language, Strings};
-use crate::image_ops::{cached_wallpaper_path, collect_images, pick_random, process_image, FolderSource};
+use crate::i18n::{Language, Strings, strings};
+use crate::image_ops::{
+    FolderSource, cached_wallpaper_path, collect_images, pick_random, process_image,
+};
 use crate::settings::{self, AppSettings, ThemeMode};
 use crate::slideshow::{SlideshowEvent, SlideshowWorker};
 use crate::startup;
 use crate::state::AppState;
 use crate::theme::apply_theme;
-use crate::wallpaper::{set_wallpaper, set_wallpaper_style, StyleMode};
+use crate::wallpaper::{StyleMode, set_wallpaper, set_wallpaper_style};
 
 /// Main application container that owns UI state and background workers.
 pub struct WallpaperApp {
@@ -34,6 +39,8 @@ pub struct WallpaperApp {
     worker: Option<SlideshowWorker>,
     /// Tray icon handle.
     tray_icon: Option<TrayIcon>,
+    /// Cached HWND for window opacity adjustments.
+    window_hwnd: Option<HWND>,
     /// Flag set by the tray event thread when restore is requested.
     tray_restore_requested: Arc<AtomicBool>,
     /// Defer minimizing to tray until after the first frame is shown.
@@ -61,18 +68,23 @@ impl WallpaperApp {
         let tray_restore_requested = Arc::new(AtomicBool::new(false));
         if tray_icon.is_some() {
             let restore_flag = Arc::clone(&tray_restore_requested);
-            thread::spawn(move || loop {
-                let Ok(event) = TrayIconEvent::receiver().recv() else {
-                    break;
-                };
-                if matches!(event, TrayIconEvent::Click { .. } | TrayIconEvent::DoubleClick { .. }) {
-                    if let Some(hwnd) = window_hwnd {
-                        unsafe {
-                            let _ = ShowWindow(hwnd, SW_RESTORE);
-                            let _ = SetForegroundWindow(hwnd);
+            thread::spawn(move || {
+                loop {
+                    let Ok(event) = TrayIconEvent::receiver().recv() else {
+                        break;
+                    };
+                    if matches!(
+                        event,
+                        TrayIconEvent::Click { .. } | TrayIconEvent::DoubleClick { .. }
+                    ) {
+                        if let Some(hwnd) = window_hwnd {
+                            unsafe {
+                                let _ = ShowWindow(hwnd, SW_RESTORE);
+                                let _ = SetForegroundWindow(hwnd);
+                            }
                         }
+                        restore_flag.store(true, Ordering::SeqCst);
                     }
-                    restore_flag.store(true, Ordering::SeqCst);
                 }
             });
         }
@@ -86,9 +98,12 @@ impl WallpaperApp {
             worker: None,
             settings,
             tray_icon,
+            window_hwnd,
             tray_restore_requested,
             minimize_pending,
         };
+
+        apply_window_opacity(app.window_hwnd, app.state.window_opacity);
 
         if should_start {
             if let Err(err) = app.start_slideshow() {
@@ -174,7 +189,11 @@ impl WallpaperApp {
                     .selected_text(theme_text)
                     .show_ui(ui, |ui| {
                         if ui
-                            .selectable_value(&mut self.state.theme, ThemeMode::Light, t.theme_light)
+                            .selectable_value(
+                                &mut self.state.theme,
+                                ThemeMode::Light,
+                                t.theme_light,
+                            )
                             .changed()
                         {
                             changed = true;
@@ -188,6 +207,21 @@ impl WallpaperApp {
                     });
                 if changed {
                     apply_theme(ctx, self.state.theme);
+                    self.persist_settings();
+                }
+            });
+
+            ui.horizontal(|ui| {
+                ui.label(t.opacity);
+                if ui
+                    .add(
+                        egui::Slider::new(&mut self.state.window_opacity, 0.3..=1.0)
+                            .clamp_to_range(true)
+                            .show_value(true),
+                    )
+                    .changed()
+                {
+                    apply_window_opacity(self.window_hwnd, self.state.window_opacity);
                     self.persist_settings();
                 }
             });
@@ -229,9 +263,10 @@ impl WallpaperApp {
             }
             if ui.button(t.add_image).clicked() {
                 if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("Images", &[
-                        "png", "jpg", "jpeg", "bmp", "gif", "tif", "tiff", "webp",
-                    ])
+                    .add_filter(
+                        "Images",
+                        &["png", "jpg", "jpeg", "bmp", "gif", "tif", "tiff", "webp"],
+                    )
                     .pick_file()
                 {
                     self.state.single_image = Some(path);
@@ -249,45 +284,47 @@ impl WallpaperApp {
 
         ui.separator();
 
-        egui::ScrollArea::vertical().id_source("folder_list").show(ui, |ui| {
-            let mut to_remove = Vec::new();
-            for (idx, folder) in self.state.folders.iter_mut().enumerate() {
-                ui.horizontal(|ui| {
-                    ui.label(folder.path.display().to_string());
-                    if ui
-                        .checkbox(&mut folder.include_subfolders, t.include_subfolders)
-                        .changed()
-                    {
-                        *settings_changed = true;
-                        *restart_needed = true;
-                    }
-                    if ui.button(t.remove).clicked() {
-                        to_remove.push(idx);
-                    }
-                });
-            }
-            for idx in to_remove.into_iter().rev() {
-                self.state.folders.remove(idx);
-                *settings_changed = true;
-                *restart_needed = true;
-            }
+        egui::ScrollArea::vertical()
+            .id_source("folder_list")
+            .show(ui, |ui| {
+                let mut to_remove = Vec::new();
+                for (idx, folder) in self.state.folders.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.label(folder.path.display().to_string());
+                        if ui
+                            .checkbox(&mut folder.include_subfolders, t.include_subfolders)
+                            .changed()
+                        {
+                            *settings_changed = true;
+                            *restart_needed = true;
+                        }
+                        if ui.button(t.remove).clicked() {
+                            to_remove.push(idx);
+                        }
+                    });
+                }
+                for idx in to_remove.into_iter().rev() {
+                    self.state.folders.remove(idx);
+                    *settings_changed = true;
+                    *restart_needed = true;
+                }
 
-            let mut clear_single = false;
-            if let Some(img) = self.state.single_image.as_ref() {
-                let label = format!("Single: {}", img.display());
-                ui.horizontal(|ui| {
-                    ui.label(label);
-                    if ui.button(t.remove).clicked() {
-                        clear_single = true;
-                    }
-                });
-            }
-            if clear_single {
-                self.state.single_image = None;
-                *settings_changed = true;
-                *restart_needed = true;
-            }
-        });
+                let mut clear_single = false;
+                if let Some(img) = self.state.single_image.as_ref() {
+                    let label = format!("Single: {}", img.display());
+                    ui.horizontal(|ui| {
+                        ui.label(label);
+                        if ui.button(t.remove).clicked() {
+                            clear_single = true;
+                        }
+                    });
+                }
+                if clear_single {
+                    self.state.single_image = None;
+                    *settings_changed = true;
+                    *restart_needed = true;
+                }
+            });
     }
 
     /// Render slideshow toggles and interval slider.
@@ -301,11 +338,17 @@ impl WallpaperApp {
         ui.separator();
 
         ui.horizontal(|ui| {
-            if ui.checkbox(&mut self.state.auto_rotate, t.auto_rotate).changed() {
+            if ui
+                .checkbox(&mut self.state.auto_rotate, t.auto_rotate)
+                .changed()
+            {
                 *settings_changed = true;
                 *restart_needed = true;
             }
-            if ui.checkbox(&mut self.state.random_order, t.random_order).changed() {
+            if ui
+                .checkbox(&mut self.state.random_order, t.random_order)
+                .changed()
+            {
                 *settings_changed = true;
                 *restart_needed = true;
             }
@@ -314,7 +357,10 @@ impl WallpaperApp {
         ui.horizontal(|ui| {
             ui.label(t.slideshow);
             if ui
-                .add(egui::Slider::new(&mut self.state.interval_secs, 5..=7200).text(t.interval_seconds))
+                .add(
+                    egui::Slider::new(&mut self.state.interval_secs, 5..=7200)
+                        .text(t.interval_seconds),
+                )
                 .changed()
             {
                 *settings_changed = true;
@@ -375,7 +421,11 @@ impl WallpaperApp {
             .show_ui(ui, |ui| {
                 for mode in StyleMode::ALL {
                     if ui
-                        .selectable_value(&mut self.state.style, mode, style_label(mode, self.state.language))
+                        .selectable_value(
+                            &mut self.state.style,
+                            mode,
+                            style_label(mode, self.state.language),
+                        )
                         .changed()
                     {
                         style_changed = true;
@@ -622,6 +672,20 @@ fn window_hwnd_from_context(cc: &CreationContext<'_>) -> Option<HWND> {
     }
 }
 
+/// Apply a per-window opacity using Win32 layered window attributes.
+fn apply_window_opacity(hwnd: Option<HWND>, opacity: f32) {
+    let Some(hwnd) = hwnd else {
+        return;
+    };
+    let clamped = opacity.clamp(0.3, 1.0);
+    let alpha = (clamped * 255.0).round() as u8;
+    unsafe {
+        let style = GetWindowLongW(hwnd, GWL_EXSTYLE);
+        let _ = SetWindowLongW(hwnd, GWL_EXSTYLE, style | WS_EX_LAYERED.0 as i32);
+        let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), alpha, LWA_ALPHA);
+    }
+}
+
 impl Drop for WallpaperApp {
     /// Ensure the worker thread is stopped before shutdown.
     fn drop(&mut self) {
@@ -659,7 +723,11 @@ fn default_tray_icon() -> Option<Icon> {
     for y in 0..size {
         for x in 0..size {
             let border = x == 0 || y == 0 || x == size - 1 || y == size - 1;
-            let (r, g, b) = if border { (255, 255, 255) } else { (60, 120, 220) };
+            let (r, g, b) = if border {
+                (255, 255, 255)
+            } else {
+                (60, 120, 220)
+            };
             rgba.extend_from_slice(&[r, g, b, 255]);
         }
     }

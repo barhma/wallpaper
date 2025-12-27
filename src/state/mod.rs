@@ -26,6 +26,8 @@ pub struct AppState {
     pub style: StyleMode,
     /// Current theme selection.
     pub theme: ThemeMode,
+    /// Window opacity in range [0.3, 1.0].
+    pub window_opacity: f32,
     /// Whether the slideshow should be running.
     pub running: bool,
 }
@@ -55,6 +57,7 @@ impl AppState {
             language: settings.language,
             style: settings.style,
             theme: settings.theme,
+            window_opacity: settings.window_opacity,
             running: settings.running,
         }
     }
@@ -79,6 +82,7 @@ impl AppState {
         settings.language = self.language;
         settings.style = self.style;
         settings.theme = self.theme;
+        settings.window_opacity = self.window_opacity;
         settings.running = self.running;
     }
 }

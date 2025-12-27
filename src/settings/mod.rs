@@ -65,6 +65,8 @@ pub struct AppSettings {
     pub running: bool,
     /// Selected UI theme.
     pub theme: ThemeMode,
+    /// Window opacity in range [0.3, 1.0].
+    pub window_opacity: f32,
 }
 
 impl Default for AppSettings {
@@ -81,6 +83,7 @@ impl Default for AppSettings {
             style: StyleMode::Fill,
             running: false,
             theme: ThemeMode::Dark,
+            window_opacity: 1.0,
         }
     }
 }
