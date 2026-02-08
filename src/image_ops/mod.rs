@@ -5,9 +5,11 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use directories::ProjectDirs;
-use image::ImageFormat;
+use image::{DynamicImage, ImageFormat, RgbImage};
 use rand::seq::SliceRandom;
 use walkdir::WalkDir;
+
+use crate::settings::StitchOrientation;
 
 /// Folder input definition used by the UI and settings.
 #[derive(Clone, Debug)]
@@ -115,4 +117,84 @@ fn cache_file_path() -> Result<PathBuf> {
     let cache_dir = dirs.cache_dir();
     std::fs::create_dir_all(cache_dir)?;
     Ok(cache_dir.join("current.bmp"))
+}
+
+/// Stitch multiple images together into a single image.
+pub fn stitch_images(
+    paths: &[PathBuf],
+    auto_rotate: bool,
+    orientation: StitchOrientation,
+) -> Result<PathBuf> {
+    if paths.is_empty() {
+        return Err(anyhow!("no images to stitch"));
+    }
+    if paths.len() == 1 {
+        return process_image(&paths[0], auto_rotate);
+    }
+
+    // Load and optionally rotate all images
+    let mut images: Vec<DynamicImage> = Vec::with_capacity(paths.len());
+    for path in paths {
+        let mut img = image::open(path)
+            .with_context(|| format!("failed to open {}", path.display()))?;
+        if auto_rotate && img.width() < img.height() {
+            img = img.rotate90();
+        }
+        images.push(img);
+    }
+
+    let stitched = match orientation {
+        StitchOrientation::Horizontal => stitch_horizontal(&images),
+        StitchOrientation::Vertical => stitch_vertical(&images),
+    };
+
+    let cache_path = cache_file_path()?;
+    stitched
+        .save_with_format(&cache_path, ImageFormat::Bmp)
+        .with_context(|| format!("failed to write {}", cache_path.display()))?;
+    Ok(cache_path)
+}
+
+/// Stitch images horizontally (side by side).
+fn stitch_horizontal(images: &[DynamicImage]) -> RgbImage {
+    let max_height = images.iter().map(|img| img.height()).max().unwrap_or(0);
+    let total_width: u32 = images.iter().map(|img| img.width()).sum();
+
+    let mut result = RgbImage::new(total_width, max_height);
+
+    let mut x_offset = 0u32;
+    for img in images {
+        let rgb = img.to_rgb8();
+        let y_offset = (max_height - img.height()) / 2;
+        for (x, y, pixel) in rgb.enumerate_pixels() {
+            if x_offset + x < total_width && y_offset + y < max_height {
+                result.put_pixel(x_offset + x, y_offset + y, *pixel);
+            }
+        }
+        x_offset += img.width();
+    }
+
+    result
+}
+
+/// Stitch images vertically (top to bottom).
+fn stitch_vertical(images: &[DynamicImage]) -> RgbImage {
+    let max_width = images.iter().map(|img| img.width()).max().unwrap_or(0);
+    let total_height: u32 = images.iter().map(|img| img.height()).sum();
+
+    let mut result = RgbImage::new(max_width, total_height);
+
+    let mut y_offset = 0u32;
+    for img in images {
+        let rgb = img.to_rgb8();
+        let x_offset = (max_width - img.width()) / 2;
+        for (x, y, pixel) in rgb.enumerate_pixels() {
+            if x_offset + x < max_width && y_offset + y < total_height {
+                result.put_pixel(x_offset + x, y_offset + y, *pixel);
+            }
+        }
+        y_offset += img.height();
+    }
+
+    result
 }

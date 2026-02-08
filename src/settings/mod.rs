@@ -39,6 +39,21 @@ impl Default for ThemeMode {
     }
 }
 
+/// Orientation for stitching multiple images.
+#[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum StitchOrientation {
+    /// Stitch images side by side.
+    Horizontal,
+    /// Stitch images top to bottom.
+    Vertical,
+}
+
+impl Default for StitchOrientation {
+    fn default() -> Self {
+        StitchOrientation::Horizontal
+    }
+}
+
 /// Settings persisted to `settings.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -67,6 +82,12 @@ pub struct AppSettings {
     pub theme: ThemeMode,
     /// Window opacity in range [0.3, 1.0].
     pub window_opacity: f32,
+    /// Whether to stitch multiple images together.
+    pub stitch_enabled: bool,
+    /// Number of images to stitch (2-5).
+    pub stitch_count: u8,
+    /// Orientation for stitching.
+    pub stitch_orientation: StitchOrientation,
 }
 
 impl Default for AppSettings {
@@ -84,6 +105,9 @@ impl Default for AppSettings {
             running: false,
             theme: ThemeMode::Dark,
             window_opacity: 1.0,
+            stitch_enabled: false,
+            stitch_count: 3,
+            stitch_orientation: StitchOrientation::Horizontal,
         }
     }
 }

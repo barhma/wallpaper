@@ -18,9 +18,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::i18n::{Language, Strings, strings};
 use crate::image_ops::{
-    FolderSource, cached_wallpaper_path, collect_images, pick_random, process_image,
+    FolderSource, cached_wallpaper_path, collect_images, pick_random, process_image, stitch_images,
 };
-use crate::settings::{self, AppSettings, ThemeMode};
+use crate::settings::{self, AppSettings, StitchOrientation, ThemeMode};
 use crate::slideshow::{SlideshowEvent, SlideshowWorker};
 use crate::startup;
 use crate::state::AppState;
@@ -367,6 +367,66 @@ impl WallpaperApp {
                 *restart_needed = true;
             }
         });
+
+        // Stitching options
+        ui.horizontal(|ui| {
+            if ui
+                .checkbox(&mut self.state.stitch_enabled, t.stitch_enabled)
+                .changed()
+            {
+                *settings_changed = true;
+                *restart_needed = true;
+            }
+        });
+
+        if self.state.stitch_enabled {
+            ui.horizontal(|ui| {
+                ui.label(t.stitch_count);
+                let mut count = self.state.stitch_count as i32;
+                if ui
+                    .add(egui::Slider::new(&mut count, 2..=5))
+                    .changed()
+                {
+                    self.state.stitch_count = count as u8;
+                    *settings_changed = true;
+                    *restart_needed = true;
+                }
+            });
+
+            ui.horizontal(|ui| {
+                ui.label(t.stitch_orientation);
+                let orientation_text = match self.state.stitch_orientation {
+                    StitchOrientation::Horizontal => t.stitch_horizontal,
+                    StitchOrientation::Vertical => t.stitch_vertical,
+                };
+                egui::ComboBox::from_id_source("stitch_orientation_combo")
+                    .selected_text(orientation_text)
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .selectable_value(
+                                &mut self.state.stitch_orientation,
+                                StitchOrientation::Horizontal,
+                                t.stitch_horizontal,
+                            )
+                            .changed()
+                        {
+                            *settings_changed = true;
+                            *restart_needed = true;
+                        }
+                        if ui
+                            .selectable_value(
+                                &mut self.state.stitch_orientation,
+                                StitchOrientation::Vertical,
+                                t.stitch_vertical,
+                            )
+                            .changed()
+                        {
+                            *settings_changed = true;
+                            *restart_needed = true;
+                        }
+                    });
+            });
+        }
     }
 
     /// Render startup-related options (run on startup, minimize to tray).
@@ -491,8 +551,22 @@ impl WallpaperApp {
             return Err(anyhow::anyhow!(t.no_images));
         }
         set_wallpaper_style(self.state.style)?;
-        let choice = pick_random(&images, None)?;
-        let processed = process_image(&choice, self.state.auto_rotate)?;
+
+        let processed = if self.state.stitch_enabled {
+            let count = (self.state.stitch_count as usize).min(images.len());
+            let mut selected = Vec::with_capacity(count);
+            let mut last: Option<std::path::PathBuf> = None;
+            for _ in 0..count {
+                let choice = pick_random(&images, last.as_ref())?;
+                last = Some(choice.clone());
+                selected.push(choice);
+            }
+            stitch_images(&selected, self.state.auto_rotate, self.state.stitch_orientation)?
+        } else {
+            let choice = pick_random(&images, None)?;
+            process_image(&choice, self.state.auto_rotate)?
+        };
+
         set_wallpaper(&processed)?;
         Ok(())
     }
@@ -522,6 +596,9 @@ impl WallpaperApp {
             self.state.style,
             Duration::from_secs(self.state.interval_secs),
             self.state.random_order,
+            self.state.stitch_enabled,
+            self.state.stitch_count,
+            self.state.stitch_orientation,
         )?;
 
         self.worker = Some(worker);
