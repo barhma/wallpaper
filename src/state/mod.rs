@@ -36,6 +36,10 @@ pub struct AppState {
     pub stitch_count: u8,
     /// Orientation for stitching.
     pub stitch_orientation: StitchOrientation,
+    /// Target width for cropping (always applied when stitching).
+    pub stitch_crop_width: u32,
+    /// Target height for cropping (always applied when stitching).
+    pub stitch_crop_height: u32,
 }
 
 impl AppState {
@@ -68,6 +72,8 @@ impl AppState {
             stitch_enabled: settings.stitch_enabled,
             stitch_count: settings.stitch_count,
             stitch_orientation: settings.stitch_orientation,
+            stitch_crop_width: settings.stitch_crop_width,
+            stitch_crop_height: settings.stitch_crop_height,
         }
     }
 
@@ -96,5 +102,7 @@ impl AppState {
         settings.stitch_enabled = self.stitch_enabled;
         settings.stitch_count = self.stitch_count;
         settings.stitch_orientation = self.stitch_orientation;
+        settings.stitch_crop_width = self.stitch_crop_width;
+        settings.stitch_crop_height = self.stitch_crop_height;
     }
 }

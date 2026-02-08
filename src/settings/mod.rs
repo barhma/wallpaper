@@ -88,6 +88,10 @@ pub struct AppSettings {
     pub stitch_count: u8,
     /// Orientation for stitching.
     pub stitch_orientation: StitchOrientation,
+    /// Target width for cropping (always applied when stitching).
+    pub stitch_crop_width: u32,
+    /// Target height for cropping (always applied when stitching).
+    pub stitch_crop_height: u32,
 }
 
 impl Default for AppSettings {
@@ -108,6 +112,8 @@ impl Default for AppSettings {
             stitch_enabled: false,
             stitch_count: 3,
             stitch_orientation: StitchOrientation::Horizontal,
+            stitch_crop_width: 5120,
+            stitch_crop_height: 1440,
         }
     }
 }

@@ -16,6 +16,17 @@ Windows wallpaper manager built in Rust with a native GUI (egui). Designed for W
 - Persisted selections and slideshow state between runs
 - Light/dark theme with dark as the default
 - Next image button for manual advance
+- Window opacity control
+- Reset to defaults button
+
+### Auto Image Stitching
+
+- Stitch 2-5 images together automatically
+- Smart rotation based on layout:
+  - Horizontal: 2→[VV], 3→[VHV], 4→[2x2 grid], 5→[3V+2H]
+  - Vertical: 2→[HH], 3→[HHH], 4→[2x2 grid], 5→[3H+2V]
+- Auto scale and center-crop to target resolution (default: 5120x1440)
+- Configurable output width and height
 
 ## Build and Run
 
@@ -46,6 +57,8 @@ cargo build --release
 - Use the Theme selector (Light/Dark). Dark is the default.
 - Minimize to tray to keep the slideshow running in the background.
 - While the slideshow is running, changes to folders or options apply immediately.
+- Enable "Auto stitch images" to combine multiple images into one wallpaper.
+- Click "Reset to Defaults" to restore all settings to their original values.
 
 ## Configuration Tips
 
@@ -55,15 +68,16 @@ cargo build --release
 ## Settings & Persistence
 
 - Settings are saved under the user config directory (ProjectDirs) as `settings.json`.
-- Saved state includes folder list, single image, slideshow options, language, style, and whether the slideshow is running.
-- Theme selection is saved and restored on launch.
+- Saved state includes folder list, single image, slideshow options, language, style, stitching settings, and whether the slideshow is running.
+- Theme selection and window opacity are saved and restored on launch.
 - On startup, the app restores the last state and resumes the slideshow if it was running.
-- The app also writes a BMP cache file under the user cache directory as `current.bmp`.
+- Temporary cache files are automatically cleaned up on startup and after wallpaper changes.
 
 ## Notes
 
 - The app converts the selected image to BMP and writes it to a cache file under your user profile.
 - Wallpaper styles are applied via Windows registry keys in `HKCU\Control Panel\Desktop`.
+- Temporary files are automatically cleaned to prevent disk space buildup.
 
 ## Startup Integration
 
@@ -72,13 +86,16 @@ cargo build --release
 
 ## Project Structure
 
-- `src/main.rs`: app entry point
+- `src/main.rs`: app entry point, temp file cleanup
 - `src/app/mod.rs`: GUI and slideshow control
-- `src/image_ops/mod.rs`: file discovery, random pick, image processing
+- `src/image_ops/mod.rs`: file discovery, random pick, image processing, stitching, cropping
 - `src/wallpaper/wallpaper.rs`: Windows wallpaper style + setter
 - `src/i18n/mod.rs`: English/Traditional Chinese strings
 - `src/settings/mod.rs`: persisted app settings
 - `src/startup/mod.rs`: Windows startup registry integration
+- `src/state/mod.rs`: runtime state management
+- `src/slideshow/mod.rs`: background slideshow worker
+- `src/theme/mod.rs`: light/dark theme application
 
 ## Contributing
 

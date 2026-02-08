@@ -45,6 +45,8 @@ pub struct WallpaperApp {
     tray_restore_requested: Arc<AtomicBool>,
     /// Defer minimizing to tray until after the first frame is shown.
     minimize_pending: bool,
+    /// Defer opacity application until the first frame.
+    opacity_pending: bool,
 }
 
 impl WallpaperApp {
@@ -101,9 +103,10 @@ impl WallpaperApp {
             window_hwnd,
             tray_restore_requested,
             minimize_pending,
+            opacity_pending: true, // Defer opacity until first frame
         };
 
-        apply_window_opacity(app.window_hwnd, app.state.window_opacity);
+        // Don't apply opacity here - defer to first frame for window to be ready
 
         if should_start {
             if let Err(err) = app.start_slideshow() {
@@ -426,6 +429,29 @@ impl WallpaperApp {
                         }
                     });
             });
+
+            // Output resolution (always applied)
+            ui.horizontal(|ui| {
+                ui.label(t.stitch_crop_width);
+                if ui
+                    .add(egui::Slider::new(&mut self.state.stitch_crop_width, 640..=7680))
+                    .changed()
+                {
+                    *settings_changed = true;
+                    *restart_needed = true;
+                }
+            });
+
+            ui.horizontal(|ui| {
+                ui.label(t.stitch_crop_height);
+                if ui
+                    .add(egui::Slider::new(&mut self.state.stitch_crop_height, 480..=4320))
+                    .changed()
+                {
+                    *settings_changed = true;
+                    *restart_needed = true;
+                }
+            });
         }
     }
 
@@ -508,7 +534,7 @@ impl WallpaperApp {
         }
     }
 
-    /// Render action buttons (apply once, next, start/stop).
+    /// Render action buttons (apply once, next, start/stop, reset).
     fn render_controls(&mut self, ui: &mut egui::Ui, t: &Strings) {
         ui.separator();
 
@@ -540,7 +566,29 @@ impl WallpaperApp {
                     Err(err) => self.status = err.to_string(),
                 }
             }
+
+            if ui.button(t.reset_defaults).clicked() {
+                self.reset_to_defaults(ui.ctx());
+            }
         });
+    }
+
+    /// Reset all settings to defaults.
+    fn reset_to_defaults(&mut self, ctx: &egui::Context) {
+        self.stop_worker();
+
+        let defaults = AppSettings::default();
+        self.settings = defaults.clone();
+        self.state = AppState::from_settings(&defaults);
+
+        // Apply theme and opacity
+        apply_theme(ctx, self.state.theme);
+        apply_window_opacity(self.window_hwnd, self.state.window_opacity);
+
+        // Persist and update status
+        let _ = settings::save(&self.settings);
+        let t = strings(self.state.language);
+        self.status = t.status_idle.to_string();
     }
 
     /// Apply a single wallpaper immediately, without starting the slideshow.
@@ -561,7 +609,14 @@ impl WallpaperApp {
                 last = Some(choice.clone());
                 selected.push(choice);
             }
-            stitch_images(&selected, self.state.auto_rotate, self.state.stitch_orientation)?
+            stitch_images(
+                &selected,
+                self.state.auto_rotate,
+                self.state.stitch_orientation,
+                true, // always crop
+                self.state.stitch_crop_width,
+                self.state.stitch_crop_height,
+            )?
         } else {
             let choice = pick_random(&images, None)?;
             process_image(&choice, self.state.auto_rotate)?
@@ -599,6 +654,8 @@ impl WallpaperApp {
             self.state.stitch_enabled,
             self.state.stitch_count,
             self.state.stitch_orientation,
+            self.state.stitch_crop_width,
+            self.state.stitch_crop_height,
         )?;
 
         self.worker = Some(worker);
@@ -659,6 +716,12 @@ impl WallpaperApp {
 
     /// Handle minimize and restore events from the tray icon.
     fn handle_tray_events(&mut self, ctx: &egui::Context) {
+        // Apply deferred opacity on first frame
+        if self.opacity_pending {
+            self.opacity_pending = false;
+            apply_window_opacity(self.window_hwnd, self.state.window_opacity);
+        }
+
         if let Some(minimized) = ctx.input(|i| i.viewport().minimized) {
             if minimized {
                 self.minimize_to_tray(ctx);

@@ -44,6 +44,9 @@ pub struct Strings {
     pub stitch_orientation: &'static str,
     pub stitch_horizontal: &'static str,
     pub stitch_vertical: &'static str,
+    pub stitch_crop_width: &'static str,
+    pub stitch_crop_height: &'static str,
+    pub reset_defaults: &'static str,
 }
 
 /// Return the string bundle for the requested language.
@@ -83,6 +86,9 @@ pub fn strings(lang: Language) -> Strings {
             stitch_orientation: "Orientation",
             stitch_horizontal: "Horizontal",
             stitch_vertical: "Vertical",
+            stitch_crop_width: "Output width",
+            stitch_crop_height: "Output height",
+            reset_defaults: "Reset to Defaults",
         },
         Language::Cht => Strings {
             title: "桌布管理",
@@ -118,6 +124,9 @@ pub fn strings(lang: Language) -> Strings {
             stitch_orientation: "拼接方向",
             stitch_horizontal: "水平",
             stitch_vertical: "垂直",
+            stitch_crop_width: "輸出寬度",
+            stitch_crop_height: "輸出高度",
+            reset_defaults: "重置為預設值",
         },
     }
 }

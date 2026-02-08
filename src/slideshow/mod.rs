@@ -52,6 +52,8 @@ impl SlideshowWorker {
         stitch_enabled: bool,
         stitch_count: u8,
         stitch_orientation: StitchOrientation,
+        stitch_crop_width: u32,
+        stitch_crop_height: u32,
     ) -> Result<Self> {
         set_wallpaper_style(style)?;
 
@@ -68,6 +70,8 @@ impl SlideshowWorker {
                 stitch_enabled,
                 stitch_count,
                 stitch_orientation,
+                stitch_crop_width,
+                stitch_crop_height,
                 cmd_rx,
                 evt_tx,
             );
@@ -113,6 +117,8 @@ fn run_worker(
     stitch_enabled: bool,
     stitch_count: u8,
     stitch_orientation: StitchOrientation,
+    stitch_crop_width: u32,
+    stitch_crop_height: u32,
     cmd_rx: Receiver<SlideshowCommand>,
     evt_tx: Sender<SlideshowEvent>,
 ) -> Result<()> {
@@ -160,7 +166,7 @@ fn run_worker(
                 .map(|p| p.file_name().unwrap_or_default().to_string_lossy().to_string())
                 .collect::<Vec<_>>()
                 .join(" + ");
-            let result = stitch_images(&selected, auto_rotate, stitch_orientation)?;
+            let result = stitch_images(&selected, auto_rotate, stitch_orientation, true, stitch_crop_width, stitch_crop_height)?;
             let _ = evt_tx.send(SlideshowEvent::Info(format!("Stitched: {}", status_msg)));
             result
         } else {
