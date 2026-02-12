@@ -4,14 +4,16 @@ This repo is a Windows-only Rust desktop app for managing wallpapers via an egui
 
 ## Project Structure & Module Organization
 
-- `src/main.rs`: application entry point and runtime wiring.
-- `src/app/mod.rs`: GUI and slideshow control flow.
-- `src/image_ops/mod.rs`: file discovery, random selection, image transforms.
+- `src/main.rs`: application entry point, temp file cleanup on startup.
+- `src/app/mod.rs`: GUI and slideshow control flow, reset to defaults.
+- `src/image_ops/mod.rs`: file discovery, random selection, image transforms, stitching, cropping, temp cleanup.
 - `src/wallpaper/wallpaper.rs`: Windows wallpaper styles and setter logic.
 - `src/i18n/mod.rs`: English/Traditional Chinese strings.
-- `src/settings/mod.rs`: persisted settings model.
+- `src/settings/mod.rs`: persisted settings model including stitching options.
 - `src/startup/mod.rs`: Windows startup registry integration.
-- `src/image/`: image assets used by the app.
+- `src/state/mod.rs`: runtime state management.
+- `src/slideshow/mod.rs`: background slideshow worker with stitching support.
+- `src/theme/mod.rs`: light/dark theme application.
 - `Cargo.toml`/`Cargo.lock`: dependencies; build output goes to `target/`.
 
 ## Build, Test, and Development Commands
@@ -43,5 +45,16 @@ This repo is a Windows-only Rust desktop app for managing wallpapers via an egui
 
 - Wallpaper styles are applied via `HKCU\Control Panel\Desktop`; avoid touching other registry hives.
 - The app writes a BMP cache under the user profile; do not commit generated files or `target/` artifacts.
-- Theme selection (default: dark) and slideshow state are stored in `settings.json`.
+- Theme selection (default: dark), window opacity, and slideshow state are stored in `settings.json`.
 - While running, changes to folders or slideshow options should take effect immediately.
+- Temp files are cleaned on startup and managed automatically.
+
+## Features Summary
+
+- **Image Stitching**: Combines 2-5 images with smart rotation patterns
+  - Horizontal: 2→[VV], 3→[VHV], 4→[2x2], 5→[3V+2H]
+  - Vertical: 2→[HH], 3→[HHH], 4→[2x2], 5→[3H+2V]
+- **Auto Scale & Crop**: Always scales and center-crops to target resolution (default 5120x1440)
+- **Reset to Defaults**: Restores all settings to factory defaults
+- **Temp File Cleanup**: Automatic cleanup on startup and after wallpaper changes
+- **Window Opacity**: Persisted and applied on startup with deferred initialization

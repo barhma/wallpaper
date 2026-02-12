@@ -10,7 +10,8 @@ use rand::seq::SliceRandom;
 use rand::SeedableRng;
 use rand_chacha::ChaChaRng;
 
-use crate::image_ops::{collect_images, process_image, FolderSource};
+use crate::image_ops::{collect_images, process_image, stitch_images, FolderSource};
+use crate::settings::StitchOrientation;
 use crate::wallpaper::{set_wallpaper, set_wallpaper_style, StyleMode};
 
 /// Command messages sent to the slideshow worker.
@@ -48,6 +49,11 @@ impl SlideshowWorker {
         style: StyleMode,
         interval: Duration,
         random_order: bool,
+        stitch_enabled: bool,
+        stitch_count: u8,
+        stitch_orientation: StitchOrientation,
+        stitch_crop_width: u32,
+        stitch_crop_height: u32,
     ) -> Result<Self> {
         set_wallpaper_style(style)?;
 
@@ -61,6 +67,11 @@ impl SlideshowWorker {
                 auto_rotate,
                 interval,
                 random_order,
+                stitch_enabled,
+                stitch_count,
+                stitch_orientation,
+                stitch_crop_width,
+                stitch_crop_height,
                 cmd_rx,
                 evt_tx,
             );
@@ -103,6 +114,11 @@ fn run_worker(
     auto_rotate: bool,
     interval: Duration,
     random_order: bool,
+    stitch_enabled: bool,
+    stitch_count: u8,
+    stitch_orientation: StitchOrientation,
+    stitch_crop_width: u32,
+    stitch_crop_height: u32,
     cmd_rx: Receiver<SlideshowCommand>,
     evt_tx: Sender<SlideshowEvent>,
 ) -> Result<()> {
@@ -133,19 +149,42 @@ fn run_worker(
             }
         }
 
-        let next = if random_order {
-            pick_random_with_rng(&images, last.as_ref(), &mut rng)?
+        let processed = if stitch_enabled {
+            let count = (stitch_count as usize).min(images.len());
+            let mut selected = Vec::with_capacity(count);
+            for _ in 0..count {
+                let next = if random_order {
+                    pick_random_with_rng(&images, last.as_ref(), &mut rng)?
+                } else {
+                    sequential_pick(&images, last.as_ref())
+                };
+                last = Some(next.clone());
+                selected.push(next);
+            }
+            let status_msg = selected
+                .iter()
+                .map(|p| p.file_name().unwrap_or_default().to_string_lossy().to_string())
+                .collect::<Vec<_>>()
+                .join(" + ");
+            let result = stitch_images(&selected, auto_rotate, stitch_orientation, true, stitch_crop_width, stitch_crop_height)?;
+            let _ = evt_tx.send(SlideshowEvent::Info(format!("Stitched: {}", status_msg)));
+            result
         } else {
-            sequential_pick(&images, last.as_ref())
+            let next = if random_order {
+                pick_random_with_rng(&images, last.as_ref(), &mut rng)?
+            } else {
+                sequential_pick(&images, last.as_ref())
+            };
+            let result = process_image(&next, auto_rotate)?;
+            let _ = evt_tx.send(SlideshowEvent::Info(format!("Set: {}", next.display())));
+            last = Some(next);
+            result
         };
 
-        let processed = process_image(&next, auto_rotate)?;
         if let Err(err) = set_wallpaper(&processed) {
             let _ = evt_tx.send(SlideshowEvent::Error(err.to_string()));
             break;
         }
-        let _ = evt_tx.send(SlideshowEvent::Info(format!("Set: {}", next.display())));
-        last = Some(next);
 
         if skip_wait {
             skip_wait = false;

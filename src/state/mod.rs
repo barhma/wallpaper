@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use crate::i18n::Language;
 use crate::image_ops::FolderSource;
-use crate::settings::{AppSettings, FolderSetting, ThemeMode};
+use crate::settings::{AppSettings, FolderSetting, StitchOrientation, ThemeMode};
 use crate::wallpaper::StyleMode;
 
 /// In-memory state that drives UI rendering and slideshow behavior.
@@ -30,6 +30,16 @@ pub struct AppState {
     pub window_opacity: f32,
     /// Whether the slideshow should be running.
     pub running: bool,
+    /// Whether to stitch multiple images together.
+    pub stitch_enabled: bool,
+    /// Number of images to stitch (2-5).
+    pub stitch_count: u8,
+    /// Orientation for stitching.
+    pub stitch_orientation: StitchOrientation,
+    /// Target width for cropping (always applied when stitching).
+    pub stitch_crop_width: u32,
+    /// Target height for cropping (always applied when stitching).
+    pub stitch_crop_height: u32,
 }
 
 impl AppState {
@@ -59,6 +69,11 @@ impl AppState {
             theme: settings.theme,
             window_opacity: settings.window_opacity,
             running: settings.running,
+            stitch_enabled: settings.stitch_enabled,
+            stitch_count: settings.stitch_count,
+            stitch_orientation: settings.stitch_orientation,
+            stitch_crop_width: settings.stitch_crop_width,
+            stitch_crop_height: settings.stitch_crop_height,
         }
     }
 
@@ -84,5 +99,10 @@ impl AppState {
         settings.theme = self.theme;
         settings.window_opacity = self.window_opacity;
         settings.running = self.running;
+        settings.stitch_enabled = self.stitch_enabled;
+        settings.stitch_count = self.stitch_count;
+        settings.stitch_orientation = self.stitch_orientation;
+        settings.stitch_crop_width = self.stitch_crop_width;
+        settings.stitch_crop_height = self.stitch_crop_height;
     }
 }

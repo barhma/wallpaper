@@ -13,6 +13,9 @@ mod wallpaper;
 
 /// Configure the native window and start the egui runtime.
 fn main() -> anyhow::Result<()> {
+    // Clean up temp files from previous runs
+    image_ops::cleanup_temp_files();
+
     let started_from_startup = std::env::args().any(|arg| arg == "--startup");
     let native_options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()

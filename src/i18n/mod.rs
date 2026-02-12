@@ -39,6 +39,14 @@ pub struct Strings {
     pub status_idle: &'static str,
     pub status_running: &'static str,
     pub no_images: &'static str,
+    pub stitch_enabled: &'static str,
+    pub stitch_count: &'static str,
+    pub stitch_orientation: &'static str,
+    pub stitch_horizontal: &'static str,
+    pub stitch_vertical: &'static str,
+    pub stitch_crop_width: &'static str,
+    pub stitch_crop_height: &'static str,
+    pub reset_defaults: &'static str,
 }
 
 /// Return the string bundle for the requested language.
@@ -73,6 +81,14 @@ pub fn strings(lang: Language) -> Strings {
             status_idle: "Idle",
             status_running: "Slideshow running",
             no_images: "No images selected",
+            stitch_enabled: "Auto stitch images",
+            stitch_count: "Stitch count",
+            stitch_orientation: "Orientation",
+            stitch_horizontal: "Horizontal",
+            stitch_vertical: "Vertical",
+            stitch_crop_width: "Output width",
+            stitch_crop_height: "Output height",
+            reset_defaults: "Reset to Defaults",
         },
         Language::Cht => Strings {
             title: "桌布管理",
@@ -103,6 +119,14 @@ pub fn strings(lang: Language) -> Strings {
             status_idle: "待命中",
             status_running: "幻燈片進行中",
             no_images: "沒有可用圖片",
+            stitch_enabled: "自動拼接圖片",
+            stitch_count: "拼接數量",
+            stitch_orientation: "拼接方向",
+            stitch_horizontal: "水平",
+            stitch_vertical: "垂直",
+            stitch_crop_width: "輸出寬度",
+            stitch_crop_height: "輸出高度",
+            reset_defaults: "重置為預設值",
         },
     }
 }
