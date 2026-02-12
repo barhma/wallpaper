@@ -45,8 +45,9 @@ pub struct WallpaperApp {
     tray_restore_requested: Arc<AtomicBool>,
     /// Defer minimizing to tray until after the first frame is shown.
     minimize_pending: bool,
-    /// Defer opacity application until the first frame.
-    opacity_pending: bool,
+    /// Defer opacity application until the window is fully ready.
+    /// Counts down from 2 to 0; opacity is applied when it reaches 0.
+    opacity_defer_frames: u8,
 }
 
 impl WallpaperApp {
@@ -103,7 +104,7 @@ impl WallpaperApp {
             window_hwnd,
             tray_restore_requested,
             minimize_pending,
-            opacity_pending: true, // Defer opacity until first frame
+            opacity_defer_frames: 2, // Defer opacity for 2 frames so the window is fully ready
         };
 
         // Don't apply opacity here - defer to first frame for window to be ready
@@ -386,10 +387,7 @@ impl WallpaperApp {
             ui.horizontal(|ui| {
                 ui.label(t.stitch_count);
                 let mut count = self.state.stitch_count as i32;
-                if ui
-                    .add(egui::Slider::new(&mut count, 2..=5))
-                    .changed()
-                {
+                if ui.add(egui::Slider::new(&mut count, 2..=5)).changed() {
                     self.state.stitch_count = count as u8;
                     *settings_changed = true;
                     *restart_needed = true;
@@ -434,7 +432,10 @@ impl WallpaperApp {
             ui.horizontal(|ui| {
                 ui.label(t.stitch_crop_width);
                 if ui
-                    .add(egui::Slider::new(&mut self.state.stitch_crop_width, 640..=7680))
+                    .add(egui::Slider::new(
+                        &mut self.state.stitch_crop_width,
+                        640..=7680,
+                    ))
                     .changed()
                 {
                     *settings_changed = true;
@@ -445,7 +446,10 @@ impl WallpaperApp {
             ui.horizontal(|ui| {
                 ui.label(t.stitch_crop_height);
                 if ui
-                    .add(egui::Slider::new(&mut self.state.stitch_crop_height, 480..=4320))
+                    .add(egui::Slider::new(
+                        &mut self.state.stitch_crop_height,
+                        480..=4320,
+                    ))
                     .changed()
                 {
                     *settings_changed = true;
@@ -716,9 +720,12 @@ impl WallpaperApp {
 
     /// Handle minimize and restore events from the tray icon.
     fn handle_tray_events(&mut self, ctx: &egui::Context) {
-        // Apply deferred opacity on first frame
-        if self.opacity_pending {
-            self.opacity_pending = false;
+        // Apply deferred opacity once the window is fully ready (after 2 frames).
+        if self.opacity_defer_frames > 1 {
+            self.opacity_defer_frames -= 1;
+            ctx.request_repaint();
+        } else if self.opacity_defer_frames == 1 {
+            self.opacity_defer_frames = 0;
             apply_window_opacity(self.window_hwnd, self.state.window_opacity);
         }
 
@@ -735,6 +742,8 @@ impl WallpaperApp {
 
         if self.tray_restore_requested.swap(false, Ordering::SeqCst) {
             self.restore_from_tray(ctx);
+            // Re-apply opacity after restore; ShowWindow(SW_RESTORE) can strip WS_EX_LAYERED.
+            apply_window_opacity(self.window_hwnd, self.state.window_opacity);
         }
     }
 
