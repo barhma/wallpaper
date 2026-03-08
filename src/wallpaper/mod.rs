@@ -2,4 +2,4 @@
 
 pub mod wallpaper;
 
-pub use wallpaper::{set_wallpaper, set_wallpaper_style, StyleMode};
+pub use wallpaper::{StyleMode, set_wallpaper, set_wallpaper_style};

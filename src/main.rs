@@ -4,10 +4,10 @@
 mod app;
 mod i18n;
 mod image_ops;
-mod slideshow;
 mod settings;
-mod state;
+mod slideshow;
 mod startup;
+mod state;
 mod theme;
 mod wallpaper;
 
@@ -19,8 +19,8 @@ fn main() -> anyhow::Result<()> {
     let started_from_startup = std::env::args().any(|arg| arg == "--startup");
     let native_options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([680.0, 600.0])
-            .with_min_inner_size([540.0, 460.0]),
+            .with_inner_size([920.0, 620.0])
+            .with_min_inner_size([720.0, 500.0]),
         ..Default::default()
     };
     eframe::run_native(

@@ -3,7 +3,7 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use directories::ProjectDirs;
 use image::{DynamicImage, ImageFormat, RgbImage};
 use rand::seq::SliceRandom;
@@ -22,7 +22,10 @@ pub fn cleanup_temp_files() {
         if let Ok(entries) = std::fs::read_dir(cache_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().map_or(false, |ext| ext == "bmp" || ext == "tmp") {
+                if path
+                    .extension()
+                    .map_or(false, |ext| ext == "bmp" || ext == "tmp")
+                {
                     let _ = std::fs::remove_file(&path);
                 }
             }
@@ -110,8 +113,8 @@ pub fn pick_random(images: &[PathBuf], last: Option<&PathBuf>) -> Result<PathBuf
 
 /// Load, optionally rotate, and cache an image as a BMP for Windows.
 pub fn process_image(path: &Path, auto_rotate: bool) -> Result<PathBuf> {
-    let mut img = image::open(path)
-        .with_context(|| format!("failed to open {}", path.display()))?;
+    let mut img =
+        image::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     if auto_rotate && img.width() < img.height() {
         img = img.rotate90();
     }
@@ -157,8 +160,8 @@ pub fn stitch_images(
     // Load all images
     let mut images: Vec<DynamicImage> = Vec::with_capacity(paths.len());
     for path in paths {
-        let img = image::open(path)
-            .with_context(|| format!("failed to open {}", path.display()))?;
+        let img =
+            image::open(path).with_context(|| format!("failed to open {}", path.display()))?;
         images.push(img);
     }
 
@@ -207,7 +210,10 @@ fn apply_smart_rotation(
         .iter()
         .enumerate()
         .map(|(i, img)| {
-            let target = targets.get(i).copied().unwrap_or(TargetOrientation::Vertical);
+            let target = targets
+                .get(i)
+                .copied()
+                .unwrap_or(TargetOrientation::Vertical);
             rotate_to_target(img, target)
         })
         .collect()
@@ -221,14 +227,14 @@ fn get_rotation_pattern(orientation: StitchOrientation, count: usize) -> Vec<Tar
         StitchOrientation::Horizontal => match count {
             2 => vec![V, V],
             3 => vec![V, H, V],
-            4 => vec![H, H, H, H], // 2x2 grid of H
+            4 => vec![H, H, H, H],    // 2x2 grid of H
             5 => vec![V, V, V, H, H], // 3V top + 2H bottom
             _ => vec![V; count],
         },
         StitchOrientation::Vertical => match count {
             2 => vec![H, H],
             3 => vec![H, H, H],
-            4 => vec![V, V, V, V], // 2x2 grid of V
+            4 => vec![V, V, V, V],    // 2x2 grid of V
             5 => vec![H, H, H, V, V], // 3H top + 2V bottom
             _ => vec![H; count],
         },
@@ -253,12 +259,12 @@ fn stitch_with_layout(images: &[DynamicImage], orientation: StitchOrientation) -
 
     match orientation {
         StitchOrientation::Horizontal => match count {
-            4 => stitch_grid(images, 2, 2), // 2x2 grid
+            4 => stitch_grid(images, 2, 2),     // 2x2 grid
             5 => stitch_two_rows(images, 3, 2), // 3 top + 2 bottom
             _ => stitch_horizontal(images),
         },
         StitchOrientation::Vertical => match count {
-            4 => stitch_grid(images, 2, 2), // 2x2 grid
+            4 => stitch_grid(images, 2, 2),     // 2x2 grid
             5 => stitch_two_rows(images, 3, 2), // 3 top + 2 bottom
             _ => stitch_vertical(images),
         },

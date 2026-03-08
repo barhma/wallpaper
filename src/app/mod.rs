@@ -1,5 +1,6 @@
 //! UI orchestration for the wallpaper manager.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -7,7 +8,9 @@ use std::time::Duration;
 
 use anyhow::Result;
 use eframe::CreationContext;
-use eframe::egui::{self, FontData, FontDefinitions, FontFamily, RichText};
+use eframe::egui::{
+    self, Button, Color32, FontData, FontDefinitions, FontFamily, RichText, Stroke,
+};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use windows::Win32::Foundation::{COLORREF, HWND};
@@ -48,6 +51,12 @@ pub struct WallpaperApp {
     /// Defer opacity application until the window is fully ready.
     /// Counts down from 2 to 0; opacity is applied when it reaches 0.
     opacity_defer_frames: u8,
+    /// Cached image list reused by idle actions and slideshow startup.
+    indexed_images: Vec<PathBuf>,
+    /// Per-folder image counts derived from the cached image list.
+    folder_image_counts: Vec<usize>,
+    /// True when the cached image list must be rebuilt from the current sources.
+    index_dirty: bool,
 }
 
 impl WallpaperApp {
@@ -55,6 +64,7 @@ impl WallpaperApp {
     pub fn new(cc: &CreationContext<'_>, started_from_startup: bool) -> Self {
         configure_fonts(&cc.egui_ctx);
         let mut settings = settings::load();
+        settings.window_opacity = settings.window_opacity.clamp(0.98, 1.0);
         if let Ok(enabled) = startup::is_enabled() {
             if settings.run_on_startup != enabled {
                 settings.run_on_startup = enabled;
@@ -105,6 +115,9 @@ impl WallpaperApp {
             tray_restore_requested,
             minimize_pending,
             opacity_defer_frames: 2, // Defer opacity for 2 frames so the window is fully ready
+            indexed_images: Vec::new(),
+            folder_image_counts: Vec::new(),
+            index_dirty: true,
         };
 
         // Don't apply opacity here - defer to first frame for window to be ready
@@ -132,15 +145,85 @@ impl WallpaperApp {
         let mut settings_changed = false;
         let mut restart_needed = false;
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            self.render_sources(ui, &t, &mut settings_changed, &mut restart_needed);
-            self.render_slideshow_options(ui, &t, &mut settings_changed, &mut restart_needed);
-            self.render_startup_section(ui, &t);
-            self.render_style_selector(ui, &t, &mut settings_changed, &mut restart_needed);
-            self.render_controls(ui, &t);
+        egui::TopBottomPanel::bottom("status_bar")
+            .resizable(false)
+            .exact_height(24.0)
+            .show(ctx, |ui| {
+                self.render_status_bar(ui);
+            });
 
-            ui.separator();
-            ui.label(format!("Status: {}", self.status));
+        egui::CentralPanel::default().show(ctx, |ui| {
+            section_frame(ui, loc(self.state.language, "Actions", "操作"), |ui| {
+                self.render_controls(ui, &t)
+            });
+            ui.add_space(6.0);
+
+            let wide_layout = ui.available_width() >= 860.0;
+            if wide_layout {
+                ui.columns(2, |columns| {
+                    section_frame(
+                        &mut columns[0],
+                        loc(self.state.language, "Sources", "來源"),
+                        |ui| {
+                            self.render_sources(ui, &t, &mut settings_changed, &mut restart_needed);
+                        },
+                    );
+                    section_frame(
+                        &mut columns[1],
+                        loc(self.state.language, "Settings", "設定"),
+                        |ui| {
+                            ui.label(
+                                RichText::new(loc(self.state.language, "Slideshow", "幻燈片"))
+                                    .strong(),
+                            );
+                            self.render_slideshow_options(
+                                ui,
+                                &t,
+                                &mut settings_changed,
+                                &mut restart_needed,
+                            );
+                            ui.separator();
+                            ui.label(
+                                RichText::new(loc(self.state.language, "Appearance", "外觀"))
+                                    .strong(),
+                            );
+                            self.render_style_selector(
+                                ui,
+                                &t,
+                                &mut settings_changed,
+                                &mut restart_needed,
+                            );
+                            ui.separator();
+                            ui.label(RichText::new(t.startup).strong());
+                            self.render_startup_section(ui, &t);
+                        },
+                    );
+                });
+            } else {
+                section_frame(ui, loc(self.state.language, "Sources", "來源"), |ui| {
+                    self.render_sources(ui, &t, &mut settings_changed, &mut restart_needed);
+                });
+                ui.add_space(6.0);
+                section_frame(ui, loc(self.state.language, "Settings", "設定"), |ui| {
+                    ui.label(
+                        RichText::new(loc(self.state.language, "Slideshow", "幻燈片")).strong(),
+                    );
+                    self.render_slideshow_options(
+                        ui,
+                        &t,
+                        &mut settings_changed,
+                        &mut restart_needed,
+                    );
+                    ui.separator();
+                    ui.label(
+                        RichText::new(loc(self.state.language, "Appearance", "外觀")).strong(),
+                    );
+                    self.render_style_selector(ui, &t, &mut settings_changed, &mut restart_needed);
+                    ui.separator();
+                    ui.label(RichText::new(t.startup).strong());
+                    self.render_startup_section(ui, &t);
+                });
+            }
         });
 
         if settings_changed {
@@ -151,11 +234,38 @@ impl WallpaperApp {
         }
     }
 
+    fn render_status_bar(&self, ui: &mut egui::Ui) {
+        let is_error = self.status.contains("failed")
+            || self.status.contains("error")
+            || self.status.contains("Error");
+        let status_color = if is_error {
+            Color32::from_rgb(200, 96, 96)
+        } else if self.state.running {
+            Color32::from_rgb(100, 180, 120)
+        } else {
+            ui.visuals().text_color()
+        };
+
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new(loc(self.state.language, "Status", "狀態")).strong());
+            ui.label(RichText::new(&self.status).color(status_color));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if self.state.running {
+                    ui.label(
+                        RichText::new(loc(self.state.language, "Running", "執行中"))
+                            .strong()
+                            .color(status_color),
+                    );
+                }
+            });
+        });
+    }
+
     /// Render the language and theme selectors.
     fn render_top_bar(&mut self, ctx: &egui::Context, t: &Strings) {
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
-            ui.heading(RichText::new(t.title).strong());
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(t.title).strong().size(16.0));
                 ui.label(t.language);
                 egui::ComboBox::from_id_source("language_combo")
                     .selected_text(match self.state.language {
@@ -180,9 +290,7 @@ impl WallpaperApp {
                             self.persist_settings();
                         }
                     });
-            });
-
-            ui.horizontal(|ui| {
+                ui.add_space(6.0);
                 ui.label(t.theme);
                 let theme_text = match self.state.theme {
                     ThemeMode::Light => t.theme_light,
@@ -213,21 +321,20 @@ impl WallpaperApp {
                     apply_theme(ctx, self.state.theme);
                     self.persist_settings();
                 }
-            });
-
-            ui.horizontal(|ui| {
+                ui.add_space(6.0);
                 ui.label(t.opacity);
                 if ui
                     .add(
-                        egui::Slider::new(&mut self.state.window_opacity, 0.3..=1.0)
+                        egui::Slider::new(&mut self.state.window_opacity, 0.98..=1.0)
                             .clamp_to_range(true)
-                            .show_value(true),
+                            .show_value(false),
                     )
                     .changed()
                 {
                     apply_window_opacity(self.window_hwnd, self.state.window_opacity);
                     self.persist_settings();
                 }
+                ui.label(format!("{:.0}%", self.state.window_opacity * 100.0));
             });
         });
     }
@@ -240,13 +347,14 @@ impl WallpaperApp {
         settings_changed: &mut bool,
         restart_needed: &mut bool,
     ) {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if ui.button(t.add_folder).clicked() {
                 if let Some(path) = rfd::FileDialog::new().pick_folder() {
                     self.state.folders.push(FolderSource {
                         path,
                         include_subfolders: true,
                     });
+                    self.mark_index_dirty();
                     *settings_changed = true;
                     *restart_needed = true;
                 }
@@ -254,6 +362,7 @@ impl WallpaperApp {
             if ui.button(t.add_folders).clicked() {
                 if let Some(paths) = rfd::FileDialog::new().pick_folders() {
                     if !paths.is_empty() {
+                        self.mark_index_dirty();
                         *settings_changed = true;
                         *restart_needed = true;
                     }
@@ -274,6 +383,7 @@ impl WallpaperApp {
                     .pick_file()
                 {
                     self.state.single_image = Some(path);
+                    self.mark_index_dirty();
                     *settings_changed = true;
                     *restart_needed = true;
                 }
@@ -281,43 +391,125 @@ impl WallpaperApp {
             if ui.button(t.clear_all).clicked() {
                 self.state.folders.clear();
                 self.state.single_image = None;
+                self.mark_index_dirty();
                 *settings_changed = true;
                 *restart_needed = true;
             }
+            if ui
+                .add_enabled(
+                    !self.state.folders.is_empty() || self.state.single_image.is_some(),
+                    Button::new(loc(self.state.language, "Refresh index", "重新整理索引")),
+                )
+                .clicked()
+            {
+                if let Err(err) = self.ensure_image_index() {
+                    self.status = err.to_string();
+                } else {
+                    self.status = format!(
+                        "{}: {}",
+                        loc(self.state.language, "Indexed images", "索引圖片"),
+                        self.indexed_images.len()
+                    );
+                }
+            }
         });
 
-        ui.separator();
+        ui.add_space(6.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(format!(
+                "{}: {}",
+                loc(self.state.language, "Folders", "資料夾"),
+                self.state.folders.len()
+            ));
+            ui.separator();
+            ui.label(format!(
+                "{}: {}",
+                loc(self.state.language, "Single image", "單張圖片"),
+                if self.state.single_image.is_some() {
+                    loc(self.state.language, "Selected", "已選取")
+                } else {
+                    loc(self.state.language, "None", "無")
+                }
+            ));
+            ui.separator();
+            ui.label(format!(
+                "{}: {}",
+                loc(self.state.language, "Image index", "圖片索引"),
+                if self.index_dirty {
+                    loc(self.state.language, "Pending refresh", "待重新整理").to_string()
+                } else {
+                    self.indexed_images.len().to_string()
+                }
+            ));
+        });
+        ui.add_space(6.0);
 
         egui::ScrollArea::vertical()
             .id_source("folder_list")
+            .max_height(360.0)
             .show(ui, |ui| {
+                if self.state.folders.is_empty() && self.state.single_image.is_none() {
+                    ui.label(loc(
+                        self.state.language,
+                        "No sources added yet.",
+                        "尚未加入任何來源。",
+                    ));
+                }
+
                 let mut to_remove = Vec::new();
+                let mut source_flags_changed = false;
                 for (idx, folder) in self.state.folders.iter_mut().enumerate() {
-                    ui.horizontal(|ui| {
-                        ui.label(folder.path.display().to_string());
-                        if ui
-                            .checkbox(&mut folder.include_subfolders, t.include_subfolders)
-                            .changed()
-                        {
-                            *settings_changed = true;
-                            *restart_needed = true;
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new(display_name(folder.path.as_path())).strong());
+                        if let Some(count) = self.folder_image_counts.get(idx) {
+                            if !self.index_dirty {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{}: {}",
+                                        loc(self.state.language, "Images", "圖片"),
+                                        count
+                                    ))
+                                    .weak(),
+                                );
+                            }
                         }
                         if ui.button(t.remove).clicked() {
                             to_remove.push(idx);
                         }
                     });
+                    ui.label(
+                        RichText::new(folder.path.display().to_string())
+                            .small()
+                            .weak(),
+                    );
+                    if ui
+                        .checkbox(&mut folder.include_subfolders, t.include_subfolders)
+                        .changed()
+                    {
+                        source_flags_changed = true;
+                        *settings_changed = true;
+                        *restart_needed = true;
+                    }
+                    ui.separator();
+                }
+                if source_flags_changed {
+                    self.mark_index_dirty();
                 }
                 for idx in to_remove.into_iter().rev() {
                     self.state.folders.remove(idx);
+                    self.mark_index_dirty();
                     *settings_changed = true;
                     *restart_needed = true;
                 }
 
                 let mut clear_single = false;
                 if let Some(img) = self.state.single_image.as_ref() {
-                    let label = format!("Single: {}", img.display());
-                    ui.horizontal(|ui| {
-                        ui.label(label);
+                    ui.label(
+                        RichText::new(loc(self.state.language, "Single image", "單張圖片"))
+                            .strong(),
+                    );
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new(img.display().to_string()).small().weak());
                         if ui.button(t.remove).clicked() {
                             clear_single = true;
                         }
@@ -325,6 +517,7 @@ impl WallpaperApp {
                 }
                 if clear_single {
                     self.state.single_image = None;
+                    self.mark_index_dirty();
                     *settings_changed = true;
                     *restart_needed = true;
                 }
@@ -339,9 +532,7 @@ impl WallpaperApp {
         settings_changed: &mut bool,
         restart_needed: &mut bool,
     ) {
-        ui.separator();
-
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if ui
                 .checkbox(&mut self.state.auto_rotate, t.auto_rotate)
                 .changed()
@@ -358,8 +549,31 @@ impl WallpaperApp {
             }
         });
 
+        ui.add_space(6.0);
+        ui.label(RichText::new(t.interval_seconds).strong());
+        ui.horizontal_wrapped(|ui| {
+            for (secs, label) in [(10_u64, "10s"), (30, "30s"), (60, "1m"), (300, "5m")] {
+                let selected = self.state.interval_secs == secs;
+                if ui
+                    .add(
+                        Button::new(label)
+                            .fill(if selected {
+                                ui.visuals().selection.bg_fill
+                            } else {
+                                ui.visuals().faint_bg_color
+                            })
+                            .stroke(Stroke::NONE),
+                    )
+                    .clicked()
+                {
+                    self.state.interval_secs = secs;
+                    *settings_changed = true;
+                    *restart_needed = true;
+                }
+            }
+        });
+
         ui.horizontal(|ui| {
-            ui.label(t.slideshow);
             if ui
                 .add(
                     egui::Slider::new(&mut self.state.interval_secs, 5..=7200)
@@ -372,97 +586,93 @@ impl WallpaperApp {
             }
         });
 
-        // Stitching options
-        ui.horizontal(|ui| {
-            if ui
-                .checkbox(&mut self.state.stitch_enabled, t.stitch_enabled)
-                .changed()
-            {
-                *settings_changed = true;
-                *restart_needed = true;
-            }
-        });
+        ui.add_space(6.0);
+        if ui
+            .checkbox(&mut self.state.stitch_enabled, t.stitch_enabled)
+            .changed()
+        {
+            *settings_changed = true;
+            *restart_needed = true;
+        }
 
         if self.state.stitch_enabled {
-            ui.horizontal(|ui| {
-                ui.label(t.stitch_count);
-                let mut count = self.state.stitch_count as i32;
-                if ui.add(egui::Slider::new(&mut count, 2..=5)).changed() {
-                    self.state.stitch_count = count as u8;
-                    *settings_changed = true;
-                    *restart_needed = true;
-                }
-            });
+            egui::Grid::new("stitch_grid")
+                .num_columns(2)
+                .spacing(egui::vec2(8.0, 6.0))
+                .show(ui, |ui| {
+                    ui.label(t.stitch_count);
+                    let mut count = self.state.stitch_count as i32;
+                    if ui.add(egui::Slider::new(&mut count, 2..=5)).changed() {
+                        self.state.stitch_count = count as u8;
+                        *settings_changed = true;
+                        *restart_needed = true;
+                    }
+                    ui.end_row();
 
-            ui.horizontal(|ui| {
-                ui.label(t.stitch_orientation);
-                let orientation_text = match self.state.stitch_orientation {
-                    StitchOrientation::Horizontal => t.stitch_horizontal,
-                    StitchOrientation::Vertical => t.stitch_vertical,
-                };
-                egui::ComboBox::from_id_source("stitch_orientation_combo")
-                    .selected_text(orientation_text)
-                    .show_ui(ui, |ui| {
-                        if ui
-                            .selectable_value(
-                                &mut self.state.stitch_orientation,
-                                StitchOrientation::Horizontal,
-                                t.stitch_horizontal,
-                            )
-                            .changed()
-                        {
-                            *settings_changed = true;
-                            *restart_needed = true;
-                        }
-                        if ui
-                            .selectable_value(
-                                &mut self.state.stitch_orientation,
-                                StitchOrientation::Vertical,
-                                t.stitch_vertical,
-                            )
-                            .changed()
-                        {
-                            *settings_changed = true;
-                            *restart_needed = true;
-                        }
-                    });
-            });
+                    ui.label(t.stitch_orientation);
+                    let orientation_text = match self.state.stitch_orientation {
+                        StitchOrientation::Horizontal => t.stitch_horizontal,
+                        StitchOrientation::Vertical => t.stitch_vertical,
+                    };
+                    egui::ComboBox::from_id_source("stitch_orientation_combo")
+                        .selected_text(orientation_text)
+                        .show_ui(ui, |ui| {
+                            if ui
+                                .selectable_value(
+                                    &mut self.state.stitch_orientation,
+                                    StitchOrientation::Horizontal,
+                                    t.stitch_horizontal,
+                                )
+                                .changed()
+                            {
+                                *settings_changed = true;
+                                *restart_needed = true;
+                            }
+                            if ui
+                                .selectable_value(
+                                    &mut self.state.stitch_orientation,
+                                    StitchOrientation::Vertical,
+                                    t.stitch_vertical,
+                                )
+                                .changed()
+                            {
+                                *settings_changed = true;
+                                *restart_needed = true;
+                            }
+                        });
+                    ui.end_row();
 
-            // Output resolution (always applied)
-            ui.horizontal(|ui| {
-                ui.label(t.stitch_crop_width);
-                if ui
-                    .add(egui::Slider::new(
-                        &mut self.state.stitch_crop_width,
-                        640..=7680,
-                    ))
-                    .changed()
-                {
-                    *settings_changed = true;
-                    *restart_needed = true;
-                }
-            });
+                    ui.label(t.stitch_crop_width);
+                    if ui
+                        .add(egui::Slider::new(
+                            &mut self.state.stitch_crop_width,
+                            640..=7680,
+                        ))
+                        .changed()
+                    {
+                        *settings_changed = true;
+                        *restart_needed = true;
+                    }
+                    ui.end_row();
 
-            ui.horizontal(|ui| {
-                ui.label(t.stitch_crop_height);
-                if ui
-                    .add(egui::Slider::new(
-                        &mut self.state.stitch_crop_height,
-                        480..=4320,
-                    ))
-                    .changed()
-                {
-                    *settings_changed = true;
-                    *restart_needed = true;
-                }
-            });
+                    ui.label(t.stitch_crop_height);
+                    if ui
+                        .add(egui::Slider::new(
+                            &mut self.state.stitch_crop_height,
+                            480..=4320,
+                        ))
+                        .changed()
+                    {
+                        *settings_changed = true;
+                        *restart_needed = true;
+                    }
+                    ui.end_row();
+                });
         }
     }
 
     /// Render startup-related options (run on startup, minimize to tray).
     fn render_startup_section(&mut self, ui: &mut egui::Ui, t: &Strings) {
-        ui.separator();
-        ui.label(t.startup);
         ui.horizontal(|ui| {
             if ui
                 .checkbox(&mut self.settings.run_on_startup, t.run_on_startup)
@@ -540,9 +750,13 @@ impl WallpaperApp {
 
     /// Render action buttons (apply once, next, start/stop, reset).
     fn render_controls(&mut self, ui: &mut egui::Ui, t: &Strings) {
-        ui.separator();
-
-        ui.horizontal(|ui| {
+        let primary_fill = if self.state.running {
+            Color32::from_rgb(186, 70, 70)
+        } else {
+            Color32::from_rgb(61, 140, 100)
+        };
+        let primary_label = if self.state.running { t.stop } else { t.start };
+        ui.horizontal_wrapped(|ui| {
             if ui.button(t.apply_once).clicked() {
                 match self.apply_once() {
                     Ok(_) => self.status = format!("{} ({})", t.apply_once, t.status_idle),
@@ -554,20 +768,27 @@ impl WallpaperApp {
                 self.request_next();
             }
 
-            if self.state.running {
-                if ui.button(t.stop).clicked() {
+            if ui
+                .add(
+                    Button::new(RichText::new(primary_label).strong())
+                        .fill(primary_fill)
+                        .stroke(Stroke::NONE),
+                )
+                .clicked()
+            {
+                if self.state.running {
                     self.stop_worker();
                     self.status = t.status_idle.to_string();
                     self.persist_settings();
-                }
-            } else if ui.button(t.start).clicked() {
-                match self.start_slideshow() {
-                    Ok(_) => {
-                        self.state.running = true;
-                        self.status = t.status_running.to_string();
-                        self.persist_settings();
+                } else {
+                    match self.start_slideshow() {
+                        Ok(_) => {
+                            self.state.running = true;
+                            self.status = t.status_running.to_string();
+                            self.persist_settings();
+                        }
+                        Err(err) => self.status = err.to_string(),
                     }
-                    Err(err) => self.status = err.to_string(),
                 }
             }
 
@@ -584,6 +805,7 @@ impl WallpaperApp {
         let defaults = AppSettings::default();
         self.settings = defaults.clone();
         self.state = AppState::from_settings(&defaults);
+        self.mark_index_dirty();
 
         // Apply theme and opacity
         apply_theme(ctx, self.state.theme);
@@ -597,7 +819,8 @@ impl WallpaperApp {
 
     /// Apply a single wallpaper immediately, without starting the slideshow.
     fn apply_once(&mut self) -> Result<()> {
-        let images = collect_images(&self.state.folders, self.state.single_image.as_deref())?;
+        self.ensure_image_index()?;
+        let images = self.indexed_images.clone();
         if images.is_empty() {
             let t = strings(self.state.language);
             return Err(anyhow::anyhow!(t.no_images));
@@ -648,9 +871,13 @@ impl WallpaperApp {
     /// Start (or restart) the slideshow worker.
     fn start_slideshow(&mut self) -> Result<()> {
         self.stop_worker();
+        self.ensure_image_index()?;
+        if self.indexed_images.is_empty() {
+            let t = strings(self.state.language);
+            return Err(anyhow::anyhow!(t.no_images));
+        }
         let worker = SlideshowWorker::start(
-            self.state.folders.clone(),
-            self.state.single_image.clone(),
+            self.indexed_images.clone(),
             self.state.auto_rotate,
             self.state.style,
             Duration::from_secs(self.state.interval_secs),
@@ -698,6 +925,36 @@ impl WallpaperApp {
         if let Err(err) = settings::save(&self.settings) {
             self.status = err.to_string();
         }
+    }
+
+    /// Mark the in-memory image index as stale after source changes.
+    fn mark_index_dirty(&mut self) {
+        self.index_dirty = true;
+        self.indexed_images.clear();
+        self.folder_image_counts.clear();
+    }
+
+    /// Ensure a current in-memory image index is available before applying wallpapers.
+    fn ensure_image_index(&mut self) -> Result<()> {
+        if !self.index_dirty {
+            return Ok(());
+        }
+
+        let images = collect_images(&self.state.folders, self.state.single_image.as_deref())?;
+        self.folder_image_counts = self
+            .state
+            .folders
+            .iter()
+            .map(|folder| {
+                images
+                    .iter()
+                    .filter(|path| source_contains(folder, path.as_path()))
+                    .count()
+            })
+            .collect();
+        self.indexed_images = images;
+        self.index_dirty = false;
+        Ok(())
     }
 
     /// Drain background worker events into UI state.
@@ -826,7 +1083,7 @@ fn apply_window_opacity(hwnd: Option<HWND>, opacity: f32) {
     let Some(hwnd) = hwnd else {
         return;
     };
-    let clamped = opacity.clamp(0.3, 1.0);
+    let clamped = opacity.clamp(0.98, 1.0);
     let alpha = (clamped * 255.0).round() as u8;
     unsafe {
         let style = GetWindowLongW(hwnd, GWL_EXSTYLE);
@@ -894,4 +1151,42 @@ fn style_label(mode: StyleMode, lang: Language) -> &'static str {
         (StyleMode::Span, Language::Cht) => "跨螢幕",
         (m, _) => m.label(),
     }
+}
+
+fn loc(lang: Language, en: &'static str, cht: &'static str) -> &'static str {
+    match lang {
+        Language::En => en,
+        Language::Cht => cht,
+    }
+}
+
+fn display_name(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| path.to_string_lossy().into_owned())
+}
+
+fn source_contains(source: &FolderSource, path: &Path) -> bool {
+    if source.include_subfolders {
+        path.starts_with(&source.path)
+    } else {
+        path.parent()
+            .map(|parent| parent == source.path.as_path())
+            .unwrap_or(false)
+    }
+}
+
+fn section_frame<R>(
+    ui: &mut egui::Ui,
+    title: &str,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    ui.group(|ui| {
+        ui.label(RichText::new(title).strong());
+        ui.add_space(4.0);
+        add_contents(ui)
+    })
+    .inner
 }

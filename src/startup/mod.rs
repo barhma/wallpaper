@@ -3,8 +3,8 @@
 use std::io;
 
 use anyhow::{Context, Result};
-use winreg::enums::{HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE};
 use winreg::RegKey;
+use winreg::enums::{HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE};
 
 /// Registry key for per-user startup apps.
 const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";

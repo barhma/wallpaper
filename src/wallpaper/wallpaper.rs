@@ -4,12 +4,12 @@ use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 
-use anyhow::{anyhow, Result};
-use winreg::enums::{HKEY_CURRENT_USER, KEY_SET_VALUE};
-use winreg::RegKey;
+use anyhow::{Result, anyhow};
 use windows::Win32::UI::WindowsAndMessaging::{
-    SystemParametersInfoW, SPI_SETDESKWALLPAPER, SPIF_SENDCHANGE, SPIF_UPDATEINIFILE,
+    SPI_SETDESKWALLPAPER, SPIF_SENDCHANGE, SPIF_UPDATEINIFILE, SystemParametersInfoW,
 };
+use winreg::RegKey;
+use winreg::enums::{HKEY_CURRENT_USER, KEY_SET_VALUE};
 
 /// Windows wallpaper style modes.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

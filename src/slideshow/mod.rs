@@ -6,13 +6,13 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use rand::seq::SliceRandom;
 use rand::SeedableRng;
+use rand::seq::SliceRandom;
 use rand_chacha::ChaChaRng;
 
-use crate::image_ops::{collect_images, process_image, stitch_images, FolderSource};
+use crate::image_ops::{process_image, stitch_images};
 use crate::settings::StitchOrientation;
-use crate::wallpaper::{set_wallpaper, set_wallpaper_style, StyleMode};
+use crate::wallpaper::{StyleMode, set_wallpaper, set_wallpaper_style};
 
 /// Command messages sent to the slideshow worker.
 #[derive(Debug, Clone, Copy)]
@@ -43,8 +43,7 @@ pub struct SlideshowWorker {
 impl SlideshowWorker {
     /// Spawn a slideshow worker and return a handle for control/event polling.
     pub fn start(
-        folders: Vec<FolderSource>,
-        single_image: Option<PathBuf>,
+        images: Vec<PathBuf>,
         auto_rotate: bool,
         style: StyleMode,
         interval: Duration,
@@ -62,8 +61,7 @@ impl SlideshowWorker {
 
         let handle = thread::spawn(move || {
             let _ = run_worker(
-                folders,
-                single_image,
+                images,
                 auto_rotate,
                 interval,
                 random_order,
@@ -109,8 +107,7 @@ impl SlideshowWorker {
 
 /// Main worker loop that processes images and applies wallpapers.
 fn run_worker(
-    folders: Vec<FolderSource>,
-    single_image: Option<PathBuf>,
+    images: Vec<PathBuf>,
     auto_rotate: bool,
     interval: Duration,
     random_order: bool,
@@ -122,13 +119,6 @@ fn run_worker(
     cmd_rx: Receiver<SlideshowCommand>,
     evt_tx: Sender<SlideshowEvent>,
 ) -> Result<()> {
-    let images = match collect_images(&folders, single_image.as_deref()) {
-        Ok(images) => images,
-        Err(err) => {
-            let _ = evt_tx.send(SlideshowEvent::Error(err.to_string()));
-            return Ok(());
-        }
-    };
     if images.is_empty() {
         let _ = evt_tx.send(SlideshowEvent::Error("No images selected".to_string()));
         return Ok(());
@@ -163,10 +153,22 @@ fn run_worker(
             }
             let status_msg = selected
                 .iter()
-                .map(|p| p.file_name().unwrap_or_default().to_string_lossy().to_string())
+                .map(|p| {
+                    p.file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string()
+                })
                 .collect::<Vec<_>>()
                 .join(" + ");
-            let result = stitch_images(&selected, auto_rotate, stitch_orientation, true, stitch_crop_width, stitch_crop_height)?;
+            let result = stitch_images(
+                &selected,
+                auto_rotate,
+                stitch_orientation,
+                true,
+                stitch_crop_width,
+                stitch_crop_height,
+            )?;
             let _ = evt_tx.send(SlideshowEvent::Info(format!("Stitched: {}", status_msg)));
             result
         } else {

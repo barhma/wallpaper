@@ -1,139 +1,99 @@
 # Wallpaper Manager
 
-A Windows-only wallpaper manager built in Rust with a native [egui](https://github.com/emilk/egui) GUI. Features tray integration, image stitching, slideshow automation, and persisted settings — all driven through a lightweight desktop interface.
+A Windows wallpaper manager built in Rust with a native `egui` desktop UI.
 
-## Features
+It is designed to be simple to use:
 
-- **Multi-folder input** — add one folder or batch-select multiple folders, each with an independent "include subfolders" toggle
-- **Single-image selection** — pick a single image file to use directly
-- **Slideshow** — random or sequential rotation with a configurable interval (5 – 7,200 seconds)
-- **Auto-rotate** — automatically rotate portrait images to landscape
-- **Set once** — apply a wallpaper immediately without starting the slideshow
-- **Next image** — advance the slideshow manually at any time
-- **Windows wallpaper styles** — Fill, Fit, Stretch, Tile, Center, Span
-- **Run on startup** — register / unregister via the Windows registry
-- **Minimize to tray** — keep the slideshow running in the background (including auto-minimize on boot)
-- **Light / dark theme** — dark is the default; persisted across sessions
-- **Window opacity** — adjustable transparency (0.3 – 1.0), persisted across sessions
-- **Bilingual UI** — English and Traditional Chinese, with automatic CJK font detection
-- **Reset to defaults** — restore all settings to factory values in one click
-- **Temp file cleanup** — automatic on startup and after wallpaper changes
+- add folders or a single image
+- rotate wallpapers randomly or in order
+- apply wallpaper once or run a slideshow
+- auto-rotate portrait images
+- choose Windows wallpaper style
+- save settings and restore them on next launch
+- support tray behavior, startup launch, theme, and opacity
 
-### Image Stitching
+## What It Can Do
 
-Combine 2 – 5 images into a single wallpaper with smart layout and rotation:
+- folder list with per-folder `include subfolders`
+- single-image source
+- random or sequential slideshow
+- `Next` button for immediate change
+- wallpaper styles: `Fill`, `Fit`, `Stretch`, `Tile`, `Center`, `Span`
+- two built-in themes:
+  - `Dark`: purple-accent dark workspace
+  - `Light`: warm beige / rice-color workspace
+- adjustable window opacity
+- run on startup
+- minimize to tray
+- English and Traditional Chinese UI
+- optional multi-image stitching with crop-based output sizing
 
-| Count | Horizontal layout    | Vertical layout      |
-| ----: | -------------------- | -------------------- |
-|     2 | V \| V               | H / H                |
-|     3 | V \| H \| V          | H / H / H            |
-|     4 | 2 × 2 grid           | 2 × 2 grid           |
-|     5 | 3 V top + 2 H bottom | 3 H top + 2 V bottom |
+## Project Layout
 
-- Always scales and center-crops to a configurable output resolution (default **5120 × 1440**)
-- Output width range: **640 – 7,680 px** · height range: **480 – 4,320 px**
+```text
+src/
+├─ main.rs              # App entry point
+├─ app/                 # egui UI and app orchestration
+├─ image_ops/           # Image discovery, processing, stitching, temp cleanup
+├─ slideshow/           # Background slideshow worker
+├─ settings/            # JSON settings model and persistence
+├─ startup/             # Windows startup registry integration
+├─ state/               # Runtime state mapped from settings
+├─ theme/               # egui theme helpers
+├─ i18n/                # English / Traditional Chinese strings
+└─ wallpaper/           # Windows wallpaper style + apply logic
+```
 
-### Supported Image Formats
+## Build And Run
 
-`png` · `jpg` / `jpeg` · `bmp` · `gif` · `tif` / `tiff` · `webp`
-
-## Build and Run
-
-> **Requires:** Rust toolchain (edition 2024). Windows only.
+Windows only.
 
 ```powershell
-# Debug build & launch
 cargo run
+```
 
-# Optimized release build
+Release build:
+
+```powershell
 cargo build --release
 ```
 
-### Development Commands
+Useful development commands:
 
-| Command                 | Description                          |
-| ----------------------- | ------------------------------------ |
-| `cargo run`             | Build and launch the debug app       |
-| `cargo build --release` | Optimized release build              |
-| `cargo test`            | Run tests (add as needed)            |
-| `cargo check`           | Fast compile check, no binary output |
-| `cargo fmt`             | Format sources with rustfmt          |
-| `cargo clippy`          | Lint sources with clippy             |
-
-## Usage
-
-1. **Add sources** — click _Add Folder_, _Add Folders_ (batch), or _Add Single Image_.
-2. **Configure** — toggle auto-rotate, random order, stitching, and set the slideshow interval.
-3. **Start / Stop** — click _Start_ to begin the slideshow, _Stop_ to pause it.
-4. **Set once** — apply a single wallpaper instantly without a slideshow.
-5. **Next** — advance to the next image immediately (works during slideshow or idle).
-6. **Remove / Clear** — remove individual entries or clear all selections.
-7. **Theme & opacity** — switch between Light / Dark and adjust window transparency.
-8. **Minimize to tray** — keep the slideshow running in the background.
-9. **Reset to Defaults** — restore all options to their original values.
-
-> While the slideshow is running, changes to folders, stitching, or style take effect immediately (the worker restarts automatically).
-
-## Settings & Persistence
-
-- Settings are saved under the per-user config directory ([`directories`](https://docs.rs/directories) crate `ProjectDirs`) as **`settings.json`**.
-- Persisted state includes: folder list, single image path, slideshow options, language, wallpaper style, theme, window opacity, stitching settings, and running state.
-- On startup the app restores the last state and resumes the slideshow if it was running.
-- Temporary BMP cache files are cleaned up automatically on startup and after each wallpaper change.
-
-## Startup & Registry Integration
-
-- **Run on startup** registers the app in `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` with a `--startup` flag.
-- The `--startup` flag enables auto-minimize to tray on boot when that option is also enabled.
-- Wallpaper styles are applied via `HKCU\Control Panel\Desktop` (`WallpaperStyle` / `TileWallpaper`).
-
-## Configuration Tips
-
-- If no images are found, check file types and folder permissions.
-- If startup registration fails, run the app as a normal desktop user (not elevated).
-- The app converts the selected image to BMP and caches it under the user profile directory.
-
-## Project Structure
-
-```
-src/
-├── main.rs              # Entry point, temp file cleanup on startup
-├── app/mod.rs           # GUI layout, slideshow control flow, tray integration
-├── image_ops/mod.rs     # Image discovery, random/sequential pick, stitching, cropping
-├── wallpaper/
-│   ├── mod.rs           # Module re-exports
-│   └── wallpaper.rs     # Windows wallpaper styles and setter logic
-├── i18n/mod.rs          # English / Traditional Chinese string bundles
-├── settings/mod.rs      # Persisted settings model (serde JSON)
-├── slideshow/mod.rs     # Background slideshow worker thread
-├── startup/mod.rs       # Windows startup registry integration
-├── state/mod.rs         # Runtime state management
-└── theme/mod.rs         # Light / dark theme application
+```powershell
+cargo check
+cargo fmt
+cargo clippy
 ```
 
-## Dependencies
+## How It Works
 
-| Crate                                                                         | Purpose                                                  |
-| ----------------------------------------------------------------------------- | -------------------------------------------------------- |
-| [`eframe`](https://docs.rs/eframe) / [`egui`](https://docs.rs/egui)           | Native GUI framework (wgpu backend)                      |
-| [`image`](https://docs.rs/image)                                              | Image loading, rotation, and format conversion           |
-| [`rand`](https://docs.rs/rand) / [`rand_chacha`](https://docs.rs/rand_chacha) | Randomized image selection                               |
-| [`rfd`](https://docs.rs/rfd)                                                  | Native file / folder picker dialogs                      |
-| [`serde`](https://docs.rs/serde) / [`serde_json`](https://docs.rs/serde_json) | Settings serialization                                   |
-| [`tray-icon`](https://docs.rs/tray-icon)                                      | System tray integration                                  |
-| [`walkdir`](https://docs.rs/walkdir)                                          | Recursive directory traversal                            |
-| [`winreg`](https://docs.rs/winreg)                                            | Windows registry access                                  |
-| [`windows`](https://docs.rs/windows)                                          | Win32 API bindings (window management, wallpaper setter) |
-| [`directories`](https://docs.rs/directories)                                  | Cross-platform user config paths                         |
-| [`anyhow`](https://docs.rs/anyhow)                                            | Error handling                                           |
-| [`raw-window-handle`](https://docs.rs/raw-window-handle)                      | HWND extraction for layered window opacity               |
+1. Add one or more folders, or choose a single image.
+2. Configure slideshow interval, order, wallpaper style, theme, and optional stitching.
+3. Click `Set once` to apply immediately or `Start` to run the slideshow.
+4. The app stores your settings in the per-user config directory and restores them on next launch.
 
-## Contributing
+## UI Layout
 
-- Keep changes Windows-focused; avoid non-Windows assumptions.
-- Update `README.md` and `GEMINI.md` when behavior or commands change.
-- Prefer small, focused PRs with clear verification steps.
+- top toolbar: language, theme, window opacity
+- action row: `Set once`, `Next`, `Start/Stop`, `Reset to Defaults`
+- sources pane: folder/image management and source list
+- settings pane: slideshow, wallpaper style, and startup behavior
+- bottom status bar: current app state and errors
+
+## Data And Cache Paths
+
+- settings: per-user `settings.json` via the `directories` crate
+- generated wallpaper cache / temp files: created under the user profile and cleaned automatically when needed
+
+## Contributor Notes
+
+- This is the active codebase. Old C++ rewrite files were removed.
+- Keep changes Windows-focused.
+- Do not commit build output like `target/` or temporary files.
+- Keep the current compact utility-style layout; avoid dashboard-style redesigns unless explicitly requested.
+- If behavior changes, update [README.md](/D:/Codes/wallpaper/README.md) and [AGENTS.md](/D:/Codes/wallpaper/AGENTS.md).
 
 ## License
 
-[MIT](LICENSE) © 2025 barhma
+[MIT](LICENSE)
