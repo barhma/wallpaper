@@ -60,6 +60,8 @@ impl Default for StitchOrientation {
 pub struct AppSettings {
     /// Whether the app starts with Windows.
     pub run_on_startup: bool,
+    /// Whether startup launch should only change wallpaper once instead of starting slideshow.
+    pub change_once_on_startup: bool,
     /// Whether to minimize to tray when started at boot.
     pub minimize_to_tray_on_start: bool,
     /// Folder list used for image discovery.
@@ -98,6 +100,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             run_on_startup: false,
+            change_once_on_startup: false,
             minimize_to_tray_on_start: false,
             folders: Vec::new(),
             single_image: None,

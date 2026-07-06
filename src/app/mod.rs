@@ -103,7 +103,8 @@ impl WallpaperApp {
         }
 
         let minimize_pending = settings.minimize_to_tray_on_start && started_from_startup;
-        let should_start = state.running;
+        let change_once_on_startup = started_from_startup && settings.change_once_on_startup;
+        let should_start = state.running && !change_once_on_startup;
 
         let mut app = Self {
             state,
@@ -122,7 +123,18 @@ impl WallpaperApp {
 
         // Don't apply opacity here - defer to first frame for window to be ready
 
-        if should_start {
+        if change_once_on_startup {
+            match app.apply_once() {
+                Ok(_) => {
+                    let t = strings(app.state.language);
+                    app.status = format!("{} ({})", t.apply_once, t.status_idle);
+                }
+                Err(err) => app.status = err.to_string(),
+            }
+            app.state.running = false;
+            app.settings.running = false;
+            let _ = settings::save(&app.settings);
+        } else if should_start {
             if let Err(err) = app.start_slideshow() {
                 app.status = err.to_string();
                 app.state.running = false;
@@ -532,6 +544,9 @@ impl WallpaperApp {
         settings_changed: &mut bool,
         restart_needed: &mut bool,
     ) {
+        let startup_once_mode =
+            self.settings.run_on_startup && self.settings.change_once_on_startup;
+
         ui.horizontal_wrapped(|ui| {
             if ui
                 .checkbox(&mut self.state.auto_rotate, t.auto_rotate)
@@ -541,7 +556,10 @@ impl WallpaperApp {
                 *restart_needed = true;
             }
             if ui
-                .checkbox(&mut self.state.random_order, t.random_order)
+                .add_enabled(
+                    !startup_once_mode,
+                    egui::Checkbox::new(&mut self.state.random_order, t.random_order),
+                )
                 .changed()
             {
                 *settings_changed = true;
@@ -555,7 +573,8 @@ impl WallpaperApp {
             for (secs, label) in [(10_u64, "10s"), (30, "30s"), (60, "1m"), (300, "5m")] {
                 let selected = self.state.interval_secs == secs;
                 if ui
-                    .add(
+                    .add_enabled(
+                        !startup_once_mode,
                         Button::new(label)
                             .fill(if selected {
                                 ui.visuals().selection.bg_fill
@@ -575,7 +594,8 @@ impl WallpaperApp {
 
         ui.horizontal(|ui| {
             if ui
-                .add(
+                .add_enabled(
+                    !startup_once_mode,
                     egui::Slider::new(&mut self.state.interval_secs, 5..=7200)
                         .text(t.interval_seconds),
                 )
@@ -686,7 +706,29 @@ impl WallpaperApp {
                 if let Err(err) = result {
                     self.status = err.to_string();
                     self.settings.run_on_startup = !self.settings.run_on_startup;
-                } else if let Err(err) = settings::save(&self.settings) {
+                } else {
+                    if !self.settings.run_on_startup {
+                        self.settings.change_once_on_startup = false;
+                    }
+                    if let Err(err) = settings::save(&self.settings) {
+                        self.status = err.to_string();
+                    }
+                }
+            }
+            if self.settings.run_on_startup
+                && ui
+                    .checkbox(
+                        &mut self.settings.change_once_on_startup,
+                        t.change_once_on_startup,
+                    )
+                    .changed()
+            {
+                if self.settings.change_once_on_startup {
+                    self.state.running = false;
+                    self.settings.running = false;
+                    self.stop_worker();
+                }
+                if let Err(err) = settings::save(&self.settings) {
                     self.status = err.to_string();
                 }
             }
@@ -750,6 +792,8 @@ impl WallpaperApp {
 
     /// Render action buttons (apply once, next, start/stop, reset).
     fn render_controls(&mut self, ui: &mut egui::Ui, t: &Strings) {
+        let startup_once_mode =
+            self.settings.run_on_startup && self.settings.change_once_on_startup;
         let primary_fill = if self.state.running {
             Color32::from_rgb(186, 70, 70)
         } else {
@@ -769,7 +813,8 @@ impl WallpaperApp {
             }
 
             if ui
-                .add(
+                .add_enabled(
+                    self.state.running || !startup_once_mode,
                     Button::new(RichText::new(primary_label).strong())
                         .fill(primary_fill)
                         .stroke(Stroke::NONE),
